@@ -118,19 +118,8 @@ module Input =
         | (pos, End) -> (pos, End)
         | (pos, Remainder (_, getNext)) -> getNext ()
 
-module Parser =
-
+module Backtrack =
     open Input
-    type ParserState<'c> = {
-        backtrack: Input<'c>
-        }
-
-    type Parser<'c, 'm, 'f> = Co.Co<Input<'c>, Result<'c, 'm, 'f>>
-
-    and Result<'c, 'm, 'f> =
-        | Match of 'm * Input<'c>
-        | Fail of 'f
-
     type BacktrackInput<'c> = {
         // buffer at the head
         current: Input<'c>
@@ -173,7 +162,42 @@ module Parser =
     let add buffer backtrack = 
         { backtrack with buffers = List.append backtrack.buffers [buffer] }
         |> skipEmptyBuffers 
-        
+
+module ParserState =
+    open Input
+
+    type ParserState<'c> = {
+        current: 'c
+        backtrack: ('c array) list
+        depth: int
+        pos: Position
+        stack: Position list
+        }
+
+    let discardUnused pstate =
+        let smallest = min (List.min pstate.stack) pstate.pos
+    
+    let pushMark pstate =
+        { pstate with stack = pstate.pos :: pstate.stack }
+
+    let popMark pstate =
+        match pstate.stack with
+        | [] -> pstate
+        | posHead :: posTail ->
+            discardUnused { pstate with 
+                stack = posTail 
+                pos = posHead }
+
+module Parser =
+    open Input
+    open ParserState
+
+    type Parser<'c, 'm, 'f> = Co.Co<ParserState<'c>, Result<'c, 'm, 'f>>
+
+    and Result<'c, 'm, 'f> =
+        | Match of 'm * Input<'c>
+        | Fail of 'f
+    
 module List =
     open Input
 
@@ -185,18 +209,19 @@ module List =
 
 open Parser
 open Input
+open Backtrack
 
 { 
     current = List.toInput [1; 2; 3]; 
     buffers = [List.toInput [4; 5; 6]]
 }
-|> Parser.advance
-|> Parser.advance
-|> Parser.advance
-|> Parser.advance
-|> Parser.advance
-|> Parser.advance
-|> Parser.advance
+|> Backtrack.advance
+|> Backtrack.advance
+|> Backtrack.advance
+|> Backtrack.advance
+|> Backtrack.advance
+|> Backtrack.advance
+|> Backtrack.advance
 
 backtrack [List.toInput [1; 2; 3]; List.toInput [4; 5; 6]]
 |> next 

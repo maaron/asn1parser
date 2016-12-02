@@ -1,8 +1,8 @@
 ﻿// Learn more about F# at http://fsharp.org. See the 'F# Tutorial' project
 // for more guidance on F# programming.
 
-#r "../packages/FParsec.1.0.2/lib/net40-client/FParsec.dll"
 #r "../packages/FParsec.1.0.2/lib/net40-client/FParsecCS.dll"
+#r "../packages/FParsec.1.0.2/lib/net40-client/FParsec.dll"
 
 open FParsec
 
@@ -54,7 +54,7 @@ module Ast =
     and OID = DefinedValue option * ObjIdComponent list
 
     and DefinedValue =
-        | ExternalValueReference of string list
+        | ExternalValueReference of ExternalValueReference
         | ValueReference of string
 
     and ExternalValueReference = {
@@ -84,12 +84,37 @@ module Ast =
 
     and Type = unit
 
-    and Value = unit
+    and BitStringValue =
+        | Bstring of string
+        | Hstring of string
+        | IdentifierList of string list
+        | Containing of Value
+    
+    and Value = 
+        | BitStringValue of BitStringValue
+        | BooleanValue of bool
+        | CharacterStringValue of string
+
+    and CharacterStringType =
+        | Unrestricted
+        | BMPString
+        | GeneralString
+        | GraphicString
+        | IA5String
+        | ISO646String
+        | NumericString
+        | PrintableString
+        | TeletexString
+        | T61String
+        | UniversalString
+        | UTF8String
+        | VideotexString
+        | VisibleString
 
     and BuiltinType =
         | BitStringType
         | BooleanType
-        | CharacterStringType
+        | CharacterStringType of CharacterStringType
         | ChoiceType
         | DateType
         | DateTimeType
@@ -115,12 +140,19 @@ module Ast =
         | TimeType
         | TimeOfDayType
 
+    and ExceptionIdentification =
+        | SignedNumber of int
+        | DefinedValue of DefinedValue
+        | TypeValue of Type * Value
+
 open Ast
 
 let str = pstring
 
-let betweenBraces = between (pchar '{') (pchar '}')
-let betweenParens = between (pchar '(') (pchar ')')
+let betweenBraces p = between (pchar '{') (pchar '}') p
+let betweenParens p = between (pchar '(') (pchar ')') p
+let betweenDoubleQuotes p = between (pchar '"') (pchar '"') p
+let betweenQuotes p = between (pchar '\'') (pchar '\'') p
 
 let EXPLICIT = str "EXPLICIT"
 let IMPLICIT = str "IMPLICIT"
@@ -135,7 +167,30 @@ let FROM = str "FROM"
 let IMPORTS = str "IMPORTS"
 let BIT = str "BIT"
 let STRING = str "STRING"
+let CHARACTER = str "CHARACTER"
 let BOOLEAN = str "BOOLEAN"
+let BMPString = str "BMPString"
+let GeneralString = str "GeneralString"
+let GraphicString = str "GraphicString"
+let IA5String = str "IA5String"
+let ISO646String = str "ISO646String"
+let NumericString = str "NumericString"
+let PrintableString = str "PrintableString"
+let TeletexString = str "TeletexString"
+let T61String = str "T61String"
+let UniversalString = str "UniversalString"
+let UTF8String = str "UTF8String"
+let VideotexString = str "VideotexString"
+let VisibleString = str "VisibleString"
+let CHOICE = str "CHOICE"
+let threeDots = str "..."
+let CONTAINING = str "CONTAINING"
+let TRUE = str "TRUE"
+let FALSE = str "FALSE"
+
+(* Recursive rules *)
+let Type, TypeRef = createParserForwardedToRef()
+let Value, ValueRef = createParserForwardedToRef()
 
 let empty = preturn ()
 
@@ -157,7 +212,7 @@ let number = manyChars digit
 
 let DefinitiveNumberForm = number
 
-let DefinitiveNameAndNumberForm = identifier .>> (DefinitiveNumberForm |> between (str "(") (str ")"))
+let DefinitiveNameAndNumberForm = identifier .>> betweenParens DefinitiveNumberForm
 
 let DefinitiveObjIdComponent =
     NameForm
@@ -168,11 +223,11 @@ let DefinitiveObjIdComponentList =
     sepBy DefinitiveObjIdComponent spaces1
 
 let DefinitiveOID =
-    DefinitiveObjIdComponentList |> between (str "{") (str "}")
+    DefinitiveObjIdComponentList |> betweenBraces
 
 let IRIValue =
     (sepBy ArcIdentifier (pchar '/'))
-    |> between (pchar '"') (pchar '"')
+    |> betweenDoubleQuotes
 
 let DefinitiveOIDandIRI = DefinitiveOID .>>. IRIValue
 
@@ -237,8 +292,8 @@ let ExternalValueReference =
         (fun m vlist -> { moduleReference = m; valueReference = vlist})
 
 let DefinedValue =
-    (ExternalValueReference |>> Ast.DefinedValue.ExternalValueReference)
-    <|> (valuereference |>> Ast.DefinedValue.ValueReference)
+    (ExternalValueReference |>> Ast.ExternalValueReference)
+    <|> (valuereference |>> Ast.ValueReference)
 
 let NumberForm = number
 
@@ -255,7 +310,7 @@ let ObjIdComponentsList =
     many1 ObjIdComponent
 
 let ObjectIdentifierValue =
-    (opt DefinedValue) .>>. ObjIdComponentsList
+    (opt DefinedValue .>>. ObjIdComponentsList)
     |> betweenBraces 
 
 let AssignedIdentifier =
@@ -286,19 +341,67 @@ let BitStringType =
 let BooleanType = BOOLEAN >>% Ast.BooleanType
 
 let RestrictedCharacterStringType =
-    BMPString
-    <|> GeneralString
-    <|> GraphicString
-    <|> IA5String
-    <|> ISO646String
-    <|> NumericString
-    <|> PrintableString
-    <|> TeletexString
-    <|> T61String
-    <|> UniversalString
-    <|> UTF8String
-    <|> VideotexString
-    <|> VisibleString
+    (BMPString >>% Ast.Unrestricted)
+    <|> (GeneralString >>% Ast.GeneralString)
+    <|> (GraphicString >>% Ast.GraphicString)
+    <|> (IA5String >>% Ast.IA5String)
+    <|> (ISO646String >>% Ast.ISO646String)
+    <|> (NumericString >>% Ast.NumericString)
+    <|> (PrintableString >>% Ast.PrintableString)
+    <|> (TeletexString >>% Ast.TeletexString)
+    <|> (T61String >>% Ast.T61String)
+    <|> (UniversalString >>% Ast.UniversalString)
+    <|> (UTF8String >>% Ast.UTF8String)
+    <|> (VideotexString >>% Ast.VideotexString)
+    <|> (VisibleString >>% Ast.VisibleString)
+
+let UnrestrictedCharacterStringType = CHARACTER .>> STRING
+
+let CharacterStringType =
+    RestrictedCharacterStringType 
+    <|> (UnrestrictedCharacterStringType >>% Ast.Unrestricted)
+
+let NamedType = identifier .>>. Type
+
+let AlternativeTypeList =
+    sepBy1 NamedType (pchar ',')
+
+let SignedNumber =
+    pipe2 (opt (pchar '-') |>> Option.isSome) number
+         (fun sign num -> 
+            let n = System.Int32.Parse(num)
+            if sign then -n else n)
+
+let bstring = 
+    manySatisfy (fun c -> c = '0' || c = '1')
+    |> betweenQuotes
+    .>> (pchar 'B')
+
+let hstring = 
+    manySatisfy (fun c -> isDigit c || isAnyOf "ABCDEF" c)
+    |> betweenQuotes
+    .>> (pchar 'H')
+
+let IdentifierList =
+    sepBy identifier (pchar ',')
+
+let BitStringValue =
+    (bstring |>> Ast.Bstring)
+    <|> (hstring |>> Ast.Hstring)
+    <|> (betweenBraces IdentifierList |>> Ast.IdentifierList)
+    <|> (CONTAINING >>. Value |>> Ast.Containing)
+
+let BooleanValue = 
+    TRUE >>% true
+    <|> (FALSE >>% false)
+
+let cstring =
+    betweenDoubleQuotes (manyChars ((satisfy ((<>) '"')) <|> (pchar '"' .>> pchar '"')))
+    
+let foo = manyChars ((satisfy ((<>) '"')) <|> (pchar '"' .>>? pchar '"'))
+runParserOnString foo () "test" "a\"\"\"bd"
+
+runParserOnString cstring () "test" "\"abc\""
 
 let RestrictedCharacterStringValue =
     cstring
@@ -306,14 +409,78 @@ let RestrictedCharacterStringValue =
     <|> Quadruple
     <|> Tuple
 
-let CharacterStringType =
-    RestrictedCharacterStringType
-    <|> UnrestrictedCharacterStringType
+let UnrestrictedCharacterStringValue = SequenceValue
+
+let CharacterStringValue =
+    RestrictedCharacterStringValue
+    <|> UnrestrictedCharacterStringValue
+
+let BuiltinValue =
+    (BitStringValue |>> Ast.BitStringValue)
+    <|> (BooleanValue |>> Ast.BooleanValue)
+    <|> (CharacterStringValue |>> Ast.CharacterStringValue)
+    <|> ChoiceValue
+    <|> EmbeddedPDVValue
+    <|> EnumeratedValue
+    <|> ExternalValue
+    <|> InstanceOfValue
+    <|> IntegerValue
+    <|> IRIValue
+    <|> NullValue
+    <|> ObjectIdentifierValue
+    <|> OctetStringValue
+    <|> RealValue
+    <|> RelativeIRIValue
+    <|> RelativeOIDValue
+    <|> SequenceValue
+    <|> SequenceOfValue
+    <|> SetValue
+    <|> SetOfValue
+    <|> PrefixedValue
+    <|> TimeValue
+
+let ValueRef =
+    BuiltinValue
+    <|> ReferencedValue
+    <|> ObjectClassFieldValue
+
+let ExceptionIdentification =
+    (SignedNumber |>> Ast.ExceptionIdentification.SignedNumber)
+    <|> (DefinedValue |>> Ast.ExceptionIdentification.DefinedValue)
+    <|> ((Type .>> pchar ':' >>. Value) |>> Ast.ExceptionIdentification.TypeValue)
+
+let ExceptionSpec = opt ((pchar '!') >>. ExceptionIdentification)
+
+let ExtensionAndException = threeDots .>> opt ExceptionSpec
+
+let AlternativeTypeLists =
+    AlternativeTypeList 
+    .>>. (opt (pchar ',') 
+        .>>. ExtensionAndException 
+        .>>. ExtensionAdditionAlternatives 
+        .>>. OptionalExtensionMarker)
+
+let ChoiceType = CHOICE >>. betweenBraces AlternativeTypeLists
+
+ExtensionAdditionAlternatives ::=
+    "," ExtensionAdditionAlternativesList
+    <|> empty
+
+ExtensionAdditionAlternativesList ::=
+    ExtensionAdditionAlternative
+    <|> ExtensionAdditionAlternativesList "," ExtensionAdditionAlternative
+
+ExtensionAdditionAlternative ::=
+    ExtensionAdditionAlternativesGroup
+    <|> NamedType
+
+ExtensionAdditionAlternativesGroup ::=
+    "[[" VersionNumber AlternativeTypeList "]]"
 
 let BuiltinType =
     BitStringType
     <|> BooleanType
-    <|> CharacterStringType
+    <|> (CharacterStringType |>> Ast.BuiltinType.CharacterStringType)
     <|> ChoiceType
     <|> DateType
     <|> DateTimeType
@@ -339,7 +506,7 @@ let BuiltinType =
     <|> TimeType
     <|> TimeOfDayType
 
-let Type = 
+let TypeRef = 
     BuiltinType 
     (*
     <|> ReferencedType 
@@ -455,40 +622,9 @@ ReferencedType ::=
     <|> TypeFromObject
     <|> ValueSetFromObjects
 
-NamedType ::= identifier Type
-
-Value ::=
-    BuiltinValue
-    <|> ReferencedValue
-    <|> ObjectClassFieldValue
-
 XMLValue ::=
     XMLBuiltinValue
     <|> XMLObjectClassFieldValue
-
-BuiltinValue ::=
-    BitStringValue
-    <|> BooleanValue
-    <|> CharacterStringValue
-    <|> ChoiceValue
-    <|> EmbeddedPDVValue
-    <|> EnumeratedValue
-    <|> ExternalValue
-    <|> InstanceOfValue
-    <|> IntegerValue
-    <|> IRIValue
-    <|> NullValue
-    <|> ObjectIdentifierValue
-    <|> OctetStringValue
-    <|> RealValue
-    <|> RelativeIRIValue
-    <|> RelativeOIDValue
-    <|> SequenceValue
-    <|> SequenceOfValue
-    <|> SetValue
-    <|> SetOfValue
-    <|> PrefixedValue
-    <|> TimeValue
 
 XMLBuiltinValue ::=
     XMLBitStringValue
@@ -522,8 +658,6 @@ NamedValue ::= identifier Value
 
 XMLNamedValue ::= "<" & identifier ">" XMLValue "</" & identifier ">"
 
-BooleanValue::= TRUE <|> FALSE
-
 XMLBooleanValue ::=
     EmptyElementBoolean
     <|> TextBoolean
@@ -547,10 +681,6 @@ NamedNumberList ::=
 NamedNumber ::=
     identifier "(" SignedNumber ")"
     <|> identifier "(" DefinedValue ")"
-
-SignedNumber ::=
-    number
-    <|> "-" number
 
 IntegerValue ::=
     SignedNumber
@@ -642,17 +772,6 @@ NamedBit ::=
     identifier "(" number ")"
     <|> identifier "(" DefinedValue ")"
 
-BitStringValue ::=
-    bstring
-    <|> hstring
-    <|> "{" IdentifierList "}"
-    <|> "{" "}"
-    <|> CONTAINING Value
-
-IdentifierList ::=
-    identifier
-    <|> IdentifierList "," identifier
-
 XMLBitStringValue ::=
     XMLTypedValue
     <|> xmlbstring
@@ -692,8 +811,6 @@ SequenceType ::=
     SEQUENCE "{" "}"
     <|> SEQUENCE "{" ExtensionAndException OptionalExtensionMarker "}"
     <|> SEQUENCE "{" ComponentTypeLists "}"
-
-ExtensionAndException ::= "..." <|> "..." ExceptionSpec
 
 OptionalExtensionMarker ::= "," "..." <|> empty
 
@@ -816,35 +933,6 @@ XMLSetOfValue ::=
     XMLValueList
     <|> XMLDelimitedItemList
     <|> empty
-
-ChoiceType ::= CHOICE "{" AlternativeTypeLists "}"
-
-AlternativeTypeLists ::=
-    RootAlternativeTypeList
-    <|> RootAlternativeTypeList ","
-    ExtensionAndException ExtensionAdditionAlternatives
-    OptionalExtensionMarker
-
-RootAlternativeTypeList ::= AlternativeTypeList
-
-ExtensionAdditionAlternatives ::=
-    "," ExtensionAdditionAlternativesList
-    <|> empty
-
-ExtensionAdditionAlternativesList ::=
-    ExtensionAdditionAlternative
-    <|> ExtensionAdditionAlternativesList "," ExtensionAdditionAlternative
-
-ExtensionAdditionAlternative ::=
-    ExtensionAdditionAlternativesGroup
-    <|> NamedType
-
-ExtensionAdditionAlternativesGroup ::=
-    "[[" VersionNumber AlternativeTypeList "]]"
-
-AlternativeTypeList ::=
-    NamedType
-    <|> AlternativeTypeList "," NamedType
 
 ChoiceValue ::= identifier ":" Value
 
@@ -996,10 +1084,6 @@ DateTimeType ::= DATE-TIME
 
 DurationType ::= DURATION
 
-CharacterStringValue ::=
-    RestrictedCharacterStringValue
-    <|> UnrestrictedCharacterStringValue
-
 XMLCharacterStringValue ::=
     XMLRestrictedCharacterStringValue
     <|> XMLUnrestrictedCharacterStringValue
@@ -1033,10 +1117,6 @@ TableColumn ::= number
 TableRow ::= number
 
 XMLRestrictedCharacterStringValue ::= xmlcstring
-
-UnrestrictedCharacterStringType ::= CHARACTER STRING
-
-UnrestrictedCharacterStringValue ::= SequenceValue
 
 XMLUnrestrictedCharacterStringValue ::= XMLSequenceValue
 
@@ -1194,10 +1274,3 @@ DurationRange ::= ValueRange
 TimePointRange ::= ValueRange
 
 RecurrenceRange ::= ValueRange
-
-ExceptionSpec ::= "!" ExceptionIdentification <|> empty
-
-ExceptionIdentification ::=
-    SignedNumber
-    <|> DefinedValue
-    <|> Type ":" Value

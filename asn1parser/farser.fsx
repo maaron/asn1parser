@@ -168,7 +168,7 @@ module ParserState =
 
     type ParserState<'c> = {
         current: 'c
-        backtrack: ('c array) list
+        backtrack: 
         depth: int
         pos: Position
         stack: Position list

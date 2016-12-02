@@ -57,6 +57,7 @@
     <None Include="Scripts\load-references-debug.fsx" />
     <None Include="Scripts\load-project-debug.fsx" />
     <None Include="farser.fsx" />
+    <None Include="farser_pull.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="FParsec">

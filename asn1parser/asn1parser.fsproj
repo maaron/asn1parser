@@ -52,12 +52,14 @@
   <ItemGroup>
     <Compile Include="AssemblyInfo.fs" />
     <Compile Include="Library1.fs" />
+    <None Include="farser_pull_layered_input.fsx" />
     <None Include="Script.fsx" />
     <Content Include="packages.config" />
     <None Include="Scripts\load-references-debug.fsx" />
     <None Include="Scripts\load-project-debug.fsx" />
     <None Include="farser.fsx" />
     <None Include="farser_pull.fsx" />
+    <None Include="generalized_input.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="FParsec">

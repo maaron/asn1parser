@@ -4,22 +4,33 @@
 // - Generalized char input type
 // - Generalized fail values
 
-// This style of parser combinator library also includes additional match information even in the 
-// case of matching results.  For example, the many parser generates not only a list of matches, 
-// but also the fail result of the final match attempt that failed.  This is important for failure 
-// analysis.
+// Try to design a layered input that can be used to parse message sequences that are occuring 
+// asynchronously/overlapping.  We want to be able to split a sequence into multiple (typically 
+// orthogonal) filtered versions, parse them individually, but also be able to validate ordering 
+// across the sub-streams.
+
+// Base sequence: 
+// 1, 2, 3, 4, 5, 6, 7, 8, 9, ...
+
+// Filtered example (evens only)
+// _, 2, _, 4, _, 6, _, 8, _, ...
+
+// We need to be able to go from one stream a filtered version and back again.  This is due to 
+// the fact that a parser returns the "remainder" of the stream after the parse, but we may want 
+// to apply the subsequent parser to either the filtered stream or the base one.
 
 module Input =
     type Position = int
 
-    type Input<'e> = {
+    type Input<'c> = {
         pos: Position
-        next: InputNext<'e>
+        next: InputNext<'c>
+        parent: Input<'c> option
         }
     
-    and InputNext<'e> = 
+    and InputNext<'c> = 
         | End
-        | Rest of 'e * (unit -> Input<'e>)
+        | Rest of 'c * (unit -> Input<'c>)
 
     let next i =
         match i.pos, i.next with
@@ -28,12 +39,26 @@ module Input =
 
     let fromStr (s: string) =
         let rec getNext pos =
-            if pos >= s.Length then { pos = pos; next = End }
-            else { pos = pos; next = Rest (s.[pos], fun () -> getNext (pos + 1)) }
+            if pos >= s.Length then { pos = pos; next = End; parent = None }
+            else { pos = pos; next = Rest (s.[pos], fun () -> getNext (pos + 1)); parent = None }
 
         match s with
-        | "" -> { pos = 0; next = End }
-        | _ -> { pos = 0; next = Rest (s.[0], fun () -> getNext 1) }
+        | "" -> { pos = 0; next = End; parent = None }
+        | _ -> { pos = 0; next = Rest (s.[0], fun () -> getNext 1); parent = None }
+    
+    let rec makeChild input =
+        { input with 
+            next = 
+                match input.next with 
+                | End -> End 
+                | Rest (c, get) -> Rest (c, fun () -> makeChild (get ()))
+
+            parent = Some input }
+
+    let getParent input = input.parent
+
+    let getParentOrSelf input =
+        match input.parent with | Some p -> p | None -> input
 
     let getPos i = i.next
 
@@ -65,8 +90,8 @@ module List =
 
     let toInput l =
         let rec toInputRec pos = function
-            | [] -> { pos = pos; next = End }
-            | head :: tail -> { pos = pos; next = Rest (head, fun () -> toInputRec (pos + 1) tail) }
+            | [] -> { pos = pos; next = End; parent = None }
+            | head :: tail -> { pos = pos; next = Rest (head, fun () -> toInputRec (pos + 1) tail); parent = None }
         toInputRec 0 l
 
 module Parser =
@@ -242,4 +267,4 @@ List.toInput [0; 1; 0; 2; 0; 3; 0] |> Input.filter ((<>) 0)
 |> Input.next
 |> Input.next
 
-[1; 2; 3; 4; 5; 6; 7; 8; 9; 10] |> List.toInput |> Input.filter (fun c -> c % 2 = 0) |> Input.next |> Input.next
+[1; 2; 3; 4; 5; 6; 7; 8; 9; 10] |> List.toInput |> Input.makeChild |> Input.filter (fun c -> c % 2 = 0) |> Input.next |> Input.getParentOrSelf

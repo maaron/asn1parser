@@ -1,4 +1,5 @@
 ﻿
+
 module String =
     let getc (s: string) i = s.[i]
 
@@ -73,89 +74,31 @@ module Input =
             | Element (c, next) -> Element (c, fun () -> filteredRec (next ()))
         filteredRec input
 
-    let duplicate input =
-        let fold i c = Some ((c, i), next i)
-        mapFold fold input input
+    let delayed input =
+        let folder prev c = 
+            match prev with
+            | None -> (c, None), Some input
+            | Some p -> let pnext = next p in (c, Some p), Some pnext
+            |> Some
 
-    let unduplicate = function
-        | End -> End
-        | Element ((c, parent), next) -> parent
+        mapFold folder None input
 
-    let zip input1 input2 =
-        mapFold (fun i2 c1 -> 
-            match i2 with
-            | Element (c2, _) -> Some ((c1, c2), next i2)
-            | _ -> None) input2 input1
+    
 
-    let lift combinator input =
-        input 
-        |> map fst 
-        |> combinator
-        |> zip input
-        |> map (fun ((a, c), b) -> b, c)
+module Parser =
+    open Input
 
-    let filterCopy predicate input = filter (fst >> predicate) input
+    type StatefulInput<'c, 's> = Input<'c> * 's
 
-    let mapCopy f = map (fun (a, b) -> (f a, b))
+    type Result<'c, 's, 'm, 'f> =
+        | Match of 'm * StatefulInput<'c, 's>
+        | Fail of 'f
 
-    (*
-    let asdf (combinator: Input<'a> -> Input<'b>) (input: Input<'a * Input<'c>>): Input<'b * Input<'c>> =
-        let rec asdfRec input =
-            match input with
-            | End -> End
-            | Element ((c, parent), next)
+    type Parser<'c, 's, 'm, 'f> = StatefulInput<'c, 's> -> Result<'c, 's, 'm, 'f>
 
-    // lift : (Input<'a> -> Input<'a>) -> Input<'a, Input<'a>> -> Input<'a, Input<'a>>
-    let lift combinator input =
-        let rec liftRec input =
-            match input with
-            | End -> End
-            | Element ((c, parent), next) -> Element (combinator parent |> duplicate, fun () -> liftRec (next ()))
-        liftRec input
-*)
 open Input
 
-"abcdefghijklmnopqrstuvwxyz" |> fromStr |> index
-|> next |> next
-
-[9; 8; 7; 6; 5; 4; 3; 2; 1] |> fromList |> next |> index |> next |> next
-
-"abcdefghijklmnopqrstuvwxyz" |> fromStr |> duplicate |> next |> next
-
-let predicate = ((=) 0)
-
-[0; 0; 1; 2; 3; 4; 5] |> fromList 
-|> skipWhile ((=) 0)
-
-[0; 0; 0; 0; 1; 2; 3] |> fromList |> skipWhile ((=) 0)
-
-[9; 8; 7; 6; 5; 4; 3; 2; 1] |> fromList 
-|> filter (fun i -> i % 2 = 0)
-|> next
-|> next
-|> next
-|> next
-|> next
-
-"abcdefghijklmnopqrstuvwxyz" |> fromStr |> duplicate |> next |> next |> unduplicate
-
-[9; 8; 7; 6; 5; 4; 3; 2; 1] |> fromList 
-|> duplicate 
-|> filterCopy (fun i -> i % 2 = 0) 
-|> next 
-|> unduplicate 
-|> next
-
-[9; 8; 7; 6; 5; 4; 3; 2; 1] |> fromList 
-|> duplicate 
-|> (filter (fun i -> i % 2 = 0) |> lift)
-|> next 
-|> unduplicate 
-|> next
-
-[4; 3; 2; 1] |> fromList |> map ((*) 2)
-|> next
-|> next
+[1; 2; 3; 4; 5] |> fromList |> delayed
 |> next
 |> next
 |> next

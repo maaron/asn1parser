@@ -61,6 +61,7 @@
     <None Include="farser_pull.fsx" />
     <None Include="generalized_input.fsx" />
     <None Include="farser_pull_state.fsx" />
+    <None Include="farser_nobacktrack.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="FParsec">

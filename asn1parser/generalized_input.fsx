@@ -67,7 +67,7 @@ module Input =
             | Element (c, next) when predicate c -> true 
             | _ -> false)
         |> Seq.head
-    
+
     let filter predicate input =
         let rec filteredRec input =
             match skipWhile (predicate >> not) input with

@@ -63,6 +63,7 @@
     <None Include="farser_pull_state.fsx" />
     <None Include="farser_nobacktrack.fsx" />
     <None Include="farser_nobacktrack_nocps.fsx" />
+    <None Include="grammar_parser.fsx" />
     <None Include="farser_simple.fsx" />
   </ItemGroup>
   <ItemGroup>

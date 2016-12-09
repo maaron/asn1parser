@@ -268,88 +268,26 @@ let removeLeftRecursion =
 let removeLeftRecursionSplit =
     ([], []) 
 
+    // Build a list of modified rules and a list of (possible) new rules from the original rules
     |> List.fold (fun (prevRules, newRules) rule -> 
         let modRule, newRule =
             substituteAllRules prevRules rule
             |> replaceDirectLeftRecursiveRule2
         (modRule :: prevRules, newRule :: newRules))
 
-    // Reverse lists so that they are in original order, since they are built up "backward" above
+    // Reverse lists so that they are in the original order, since they are built up "backward" above
     >> (fun (a, b) -> (List.rev a, List.rev b))
 
 let removeLeftRecursion2 rules =
     removeLeftRecursionSplit rules
-    ||> List.zip
-    |> List.zip rules
+    ||> List.zip3 rules
     |> List.collect (function
-        | rule, (modRule, Some newRule) -> [modRule; newRule]
-        | rule, (_, None) -> [rule])
-
-removeLeftRecursion
-    ([
-        { name = "Expression"; production = Alternate [Sequence [Reference "Expression"; Constant "-"; Reference "Term"]; Sequence [Reference "Term"]]}
-    ])
-
-removeLeftRecursion
-    ([
-        { name = "Term"; production = Alternate [Sequence [Reference "Term"; Constant "*"; Reference "Factor"]; Sequence [Reference "Factor"]]}
-    ])
-
-removeLeftRecursion
-    ([
-        { name = "Expression"; production = Alternate [Sequence [Reference "Expression"; Constant "-"; Reference "Term"]; Sequence [Reference "Term"]]}
-        { name = "Term"; production = Alternate [Sequence [Reference "Term"; Constant "*"; Reference "Factor"]; Sequence [Reference "Factor"]]}
-    ])
-
-substituteSequence
-    ([
-        { name = "Expression"; production = Alternate [Sequence [Reference "Expression"; Constant "-"; Reference "Term"]; Sequence [Reference "Term"]]}
-        { name = "Term"; production = Alternate [Sequence [Reference "Term"; Constant "*"; Reference "Factor"]; Sequence [Reference "Factor"]]}
-    ])
-    (Sequence [Reference "Expression"])
-
-removeLeftRecursion 
-    ([
-        { name = "Expression"; production = Alternate [Sequence [Reference "Expression"; Constant "-"; Reference "Term"]; Sequence [Reference "Term"]]}
-        { name = "Term"; production = Alternate [Sequence [Reference "Term"; Constant "*"; Reference "Factor"]; Sequence [Reference "Factor"]]}
-        { name = "Factor"; production = Alternate [Sequence [Constant "("; Reference "Expression"; Constant ")"]; Sequence [Reference "Integer"]]}
-    ])
-
-removeLeftRecursion 
-    ([
-        { name = "Expression"; production = Alternate [Sequence [Reference "Expression"; Constant "-"; Reference "Term"]; Sequence [Reference "Term"]]}
-        { name = "Term"; production = Alternate [Sequence [Reference "Term"; Constant "*"; Reference "Factor"]; Sequence [Reference "Factor"]]}
-        { name = "Factor"; production = Alternate [Sequence [Reference "Expression"]]}
-    ])
-
-removeLeftRecursion 
-    ([
-        { name = "Expression"; production = Alternate [Sequence [Reference "Expression"; Constant "-"; Reference "Term"]; Sequence [Reference "Term"]]}
-        { name = "Term"; production = Alternate [Sequence [Reference "Term"; Constant "*"; Reference "Factor"]; Sequence [Reference "Factor"]]}
-        { name = "Factor"; production = Alternate [Sequence [Reference "Expression"; Reference "Expression"]]}
-    ])
-    |> prettyGrammar |> System.Console.WriteLine
+        | rule, modRule, Some newRule -> [modRule; newRule]
+        | rule, _, None -> [rule])
 
 let asn1GrammarFile = (__SOURCE_DIRECTORY__ + "\\..\\grammar.txt")
 
-runParserOnFile grammar () asn1GrammarFile (System.Text.UTF8Encoding ())
-|> function 
-    | Failure (e, b, c) -> 
-        System.Console.WriteLine e
-
-    | Success (s, _, pos) -> 
-        System.Console.WriteLine (s |> prettyGrammar)
-        System.Console.WriteLine pos
-
-let asn1nonrec = 
-    runParserOnFile 
-        (grammar |>> removeLeftRecursion)
-        () 
-        asn1GrammarFile
-        (System.Text.UTF8Encoding ())
-    |> function Success (ast, _, _) -> ast | Failure (e, _, _) -> failwith e
-
-let ruleReferences grammar =
+let grammarRuleReferences grammar =
     let rec prodRefs prod =
         alternates prod
         |> List.collect (fun (Sequence s) -> s)
@@ -363,15 +301,7 @@ let ruleReferences grammar =
     |> List.distinct
 
 let unresolvedRuleReferences grammar =
-    ruleReferences grammar |> List.filter (fun r -> tryFindRule r grammar |> Option.isNone)
-
-unresolvedRuleReferences asn1nonrec |> List.length
-asn1nonrec |> List.length
-
-asn1nonrec |> prettyGrammar |> System.Console.WriteLine
-
-runParserOnFile grammar () asn1GrammarFile (System.Text.UTF8Encoding ())
-|> function Success (ast, _, _) -> prettyGrammar ast | _ -> "parse failed"
+    grammarRuleReferences grammar |> List.filter (fun r -> tryFindRule r grammar |> Option.isNone)
 
 let parseBnfString s =
     runParserOnString grammar () "string" s
@@ -458,10 +388,76 @@ PrefixedValue ::= Value
 // Or is there a way we can save the original rules and use them in cases where no 
 // recursion removal was needed?
 
-// Testing for cycles- looks like we just need to prune empty/unused afterward?
+// Testing for cycles- looks like we just need to prune empty/unused afterward?  It's not quite 
+// clear, but I think that the algorithm described in 
+// https://en.wikipedia.org/wiki/Left_recursion includes a cycle-removal part, in the "iterate 
+// until grammar is unchanged" comment.  Other examples of this algorithm don't include this, and 
+// instead just iterate over the rules prior to "Ai".  I think the difference is the cycle 
+// detection.
 parseBnfString """
 A ::= B x
 B ::= C x
 C ::= A x
 """
 |> Option.map removeLeftRecursion
+
+module List =
+    let assoc item list =
+        List.find (fst >> (=) item) list |> snd
+
+    let tryAssoc item list =
+        List.tryFind (fst >> (=) item) list |> Option.map snd
+
+// Put the rules in "declare before use" order, and mark those which must be recursive
+let dfs graph visited start_node = 
+  let rec explore path (visited, cycles) node = 
+    if List.contains node path    then visited, node :: cycles else
+    if List.contains node visited then visited, cycles else     
+      let new_path = node :: path in 
+      let edges    = List.assoc node graph in
+      let visited, cycles  = List.fold (explore new_path) (visited, cycles) edges in
+      node :: visited, cycles
+  in explore [] visited start_node
+
+let toposort graph = 
+  List.fold (fun visited (node,_) -> dfs graph visited node) ([], []) graph
+
+toposort [1, [2; 3]; 2, [3; 4]; 3, [4;5]; 4, [5]; 5, []]
+toposort [1, []; 2, [1]; 3, [1;2]; 4, [2;3]; 5, [3;4]]
+toposort [1, [2; 3]; 2, [3; 4]; 3, [4;5]; 4, [5]; 5, [2; 3]]
+
+let rec ruleReferences rule =
+    alternates rule
+    |> List.collect (fun (Sequence s) -> s)
+    |> List.collect (function
+        | Reference r -> [r]
+        | Expression e -> ruleReferences e
+        | _ -> [])
+
+let ruleDependencyGraph grammar =
+    grammar
+    |> List.map (fun r -> (r.name, r.production))
+    |> List.map (fun rule -> 
+        let (name, prod) = rule
+        rule,
+        ruleReferences prod
+        |> List.distinct
+        |> List.map (fun n -> List.tryFind (fun r -> r.name = n) grammar)
+        |> List.choose id
+        |> List.map (fun r -> (r.name, r.production)))
+
+module Tuple =
+    let map f (a, b) = (f a, f b)
+
+let declarationOrder grammar = 
+    grammar 
+    |> ruleDependencyGraph 
+    |> toposort 
+    |> Tuple.map (
+        List.distinct 
+        >> List.map (fun (n, p) ->
+            { name = n; production = p }))
+
+parseBnfFile asn1GrammarFile
+|> Option.map declarationOrder
+|> Option.map (Tuple.map prettyGrammar)

@@ -121,7 +121,7 @@ let rule =
     ident .>> linearSpace .>> (pstring "::=") .>> linearSpace .>>. production .>> (opt skipNewline)
     |>> (fun (n, p) -> { name = n; production = p})
 
-let grammar = many1 rule
+let grammar = spaces >>. many1 rule
 
 let parse s =
     runParserOnString grammar () "test" s
@@ -178,19 +178,25 @@ let (|MatchDirectLeftRecursive|_|) rule =
     | [] -> None
     | _ -> Some (rule, recAlts, nonRecAlts)
 
-let discardEqualityRules = 
-    List.filter (function 
-        | (rule, MatchReference reference) when rule = reference -> false 
-        | _ -> true)
+let isIdentityRule name = function
+    | Sequence [Reference r] when r = name -> true
+    | _ -> false
 
-discardEqualityRules ["rule", Alternate [Sequence [Reference "rulea"]]]
-discardEqualityRules ["rule", Alternate [Sequence [Reference "rule"]]]
+let discardEqualityRules rule = 
+    { rule with 
+        production = 
+            rule.production 
+            |> alternates
+            |> List.filter (isIdentityRule rule.name >> not)
+            |> Alternate
+    }
 
 let addReference reference (Sequence sequence) = Sequence (sequence @ [Reference reference])
 
 let removeFirstReference (Sequence s) = Sequence (List.tail s)
 
-let replaceDirectLeftRecursiveRule = function
+let replaceDirectLeftRecursiveRule = 
+    discardEqualityRules >> function
     | MatchDirectLeftRecursive (rule, recAlts, nonRecAlts) ->
         let newRule = rule.name + "'"
         let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
@@ -288,7 +294,9 @@ removeLeftRecursion
     ])
     |> prettyGrammar |> System.Console.WriteLine
 
-runParserOnFile grammar () "C:\\Users\\maaron\\Source\\Repos\\asn1parser\\grammar.txt" (System.Text.UTF8Encoding ())
+let asn1GrammarFile = (__SOURCE_DIRECTORY__ + "\\..\\grammar.txt")
+
+runParserOnFile grammar () asn1GrammarFile (System.Text.UTF8Encoding ())
 |> function 
     | Failure (e, b, c) -> 
         System.Console.WriteLine e
@@ -301,7 +309,7 @@ let asn1nonrec =
     runParserOnFile 
         (grammar |>> removeLeftRecursion)
         () 
-        "C:\\Users\\maaron\\Source\\Repos\\asn1parser\\grammar.txt" 
+        asn1GrammarFile
         (System.Text.UTF8Encoding ())
     |> function Success (ast, _, _) -> ast | Failure (e, _, _) -> failwith e
 
@@ -323,3 +331,67 @@ let unresolvedRuleReferences grammar =
 
 unresolvedRuleReferences asn1nonrec |> List.length
 asn1nonrec |> List.length
+
+asn1nonrec |> prettyGrammar |> System.Console.WriteLine
+
+runParserOnFile grammar () asn1GrammarFile (System.Text.UTF8Encoding ())
+|> function Success (ast, _, _) -> prettyGrammar ast | _ -> "parse failed"
+
+let parseBnfString s =
+    runParserOnString grammar () "string" s
+    |> function Success (ast, _, _) -> Some ast | _ -> None
+
+let parseBnfFile file =
+    runParserOnFile grammar () file (System.Text.UTF8Encoding ())
+    |> function Success (ast, _, _) -> Some ast | _ -> None
+
+parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion
+|> Option.map prettyGrammar
+|> System.Console.WriteLine
+
+parseBnfString
+    """
+Value ::= BitStringValue | PrefixedValue
+PrefixedValue ::= Value
+"""
+|> Option.map (List.fold (fun prevRules rule -> 
+                    substituteAllRules prevRules rule
+                    //|> replaceDirectLeftRecursiveRule
+                    |> List.singleton
+                    |> List.append prevRules) [])
+|> Option.map (List.map replaceDirectLeftRecursiveRule)
+
+{name = "PrefixedValue";
+      production =
+       Alternate
+         [Sequence [Reference "BitStringValue"];
+          Sequence [Reference "PrefixedValue"]];}
+|> replaceDirectLeftRecursiveRule
+
+{name = "PrefixedValue";
+      production =
+       Alternate
+         [Sequence [Reference "BitStringValue"];
+          Sequence [Reference "PrefixedValue"]];}
+|> (discardEqualityRules >> function
+    | MatchDirectLeftRecursive (rule, recAlts, nonRecAlts) ->
+        let newRule = rule.name + "'"
+        let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
+        let newRuleAlts = 
+            (recAlts 
+                |> List.map removeFirstReference 
+                |> List.map (addReference newRule))
+             @ [Sequence [Empty]]
+
+        [ { name = rule.name; production = Alternate oldRuleAlts}
+          { name = newRule; production = Alternate newRuleAlts } ]
+
+    | _ as skip -> [skip])
+
+{ name = "PrefixedValue"; production = Alternate [Sequence [Reference "BitStringValue"]; Sequence [Reference "PrefixedValue"]] }
+|> discardEqualityRules
+
+// i=0: Do nothing, since Value rule is not directly recursive
+// i=1, j=0: Value rule is substituted into PrefixedValue rule to get "PrefixedValue ::= BitStringValue | PrefixedValue"
+// i=1: Remove directly recursive 2nd alternate of PrefixedValue rule to get "PrefixedValue ::= BitStringValue"

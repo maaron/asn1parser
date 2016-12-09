@@ -63,6 +63,7 @@
     <None Include="farser_pull_state.fsx" />
     <None Include="farser_nobacktrack.fsx" />
     <None Include="farser_nobacktrack_nocps.fsx" />
+    <None Include="farser_simple.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="FParsec">
@@ -71,6 +72,10 @@
     </Reference>
     <Reference Include="FParsecCS">
       <HintPath>..\packages\FParsec.1.0.2\lib\net40-client\FParsecCS.dll</HintPath>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="FsAttoparsec">
+      <HintPath>..\packages\FsAttoparsec.0.4.0.0\lib\net40\FsAttoparsec.dll</HintPath>
       <Private>True</Private>
     </Reference>
     <Reference Include="mscorlib" />

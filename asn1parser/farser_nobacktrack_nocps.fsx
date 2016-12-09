@@ -138,3 +138,4 @@ let asdf p = List.fold (fun s c -> thenParse c s) (Step p)
 
 ['a'; 'b']
 |> asdf (tup <!> (cnst 'a' <|> cnst 'b') <*> (cnst 'a' <|> cnst 'b'))
+

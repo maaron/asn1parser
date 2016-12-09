@@ -3,99 +3,108 @@
 
 #r "../packages/FParsec.1.0.2/lib/net40-client/FParsecCS.dll"
 #r "../packages/FParsec.1.0.2/lib/net40-client/FParsec.dll"
+//#r "../packages/FsAttoparsec.0.4.0.0/lib/net40/FsAttoparsec.dll"
 
 open FParsec
 
 module Ast =
-    type ModuleDefinition = {
-        moduleIdentifier: ModuleIdentifier
+    type ModuleDefinitionType = {
+        moduleIdentifier: ModuleIdentifierType
         encodingReference: string option
         tagDefault: TagDefault
-        extensionDefault: ExtensionDefault
+        extensionDefault: ExtensionDefaultType
         }
 
-    and ModuleIdentifier = {
+    and ModuleIdentifierType = {
         reference: string
-        definitive: DefinitiveIdentifier
+        definitive: DefinitiveIdentifierType
         }
+    with
+        static member make r d = { reference = r; definitive = d }
 
-    and DefinitiveIdentifier = {
+    and DefinitiveIdentifierType = {
         oid: string list
         iri: string list option
         }
+        with 
+            static member make oid iri = { oid = oid; iri = iri }
 
     and TagDefault = Explicit | Implicit | Automatic | Empty
 
-    and ExtensionDefault = Implied | Empty
+    and ExtensionDefaultType = Implied | Empty
 
-    and ModuleBody = {
-        imports: Imports
-        exports: Exports
-        assignmentList: Assignment list
+    and ModuleBodyType = {
+        imports: ImportsType
+        exports: ExportsType
+        assignmentList: AssignmentType list
         }
 
-    and Exports =
+    and ExportsType =
         | All
-        | Symbols of Symbol list
+        | Symbols of SymbolType list
         | Empty
 
-    and Symbol = string
+    and SymbolType = string
 
-    and Assignment = {
+    and AssignmentType = {
         valuereference: string
-        definition: Value
+        definition: ValueType
         }
 
-    and AssignedIdentifier =
+    and AssignedIdentifierType =
         | ObjectIdentifierValue of OID
-        | DefinedValue of DefinedValue
+        | DefinedValue of DefinedValueType
         | Empty
 
-    and OID = DefinedValue option * ObjIdComponent list
+    and OID = DefinedValueType option * ObjIdComponentType list
 
-    and DefinedValue =
-        | ExternalValueReference of ExternalValueReference
+    and DefinedValueType =
+        | External of ExternalValueReferenceType
         | ValueReference of string
 
-    and ExternalValueReference = {
+    and ExternalValueReferenceType = {
         moduleReference: string
         valueReference: string list
         }
+        with
+            static member make m v = { moduleReference = m; valueReference = v }
 
-    and ObjIdComponent =
+    and ObjIdComponentType =
         | NumberForm of string
         | NameForm of string
         | NameAndNumberForm of string * string
-        | DefinedValue of DefinedValue
+        | DefinedValue of DefinedValueType
 
-    and Imports =
-        | Symbols of SymbolsFromModule list
+    and ImportsType =
+        | Symbols of SymbolsFromModuleType list
         | Empty
 
-    and SymbolsFromModule = {
-        moduleReference: string * AssignedIdentifier
-        symbols: Symbol list
+    and SymbolsFromModuleType = {
+        moduleReference: string * AssignedIdentifierType
+        symbols: SymbolType list
         }
+        with
+            static member make symbols mr = { moduleReference = mr; symbols = symbols }
 
-    and TypeAssignment = {
+    and TypeAssignmentType = {
         typereference: string
-        definition: Type
+        definition: TypeType
         }
 
-    and Type = unit
+    and TypeType = unit
 
-    and BitStringValue =
+    and BitStringValueType =
         | Bstring of string
         | Hstring of string
         | IdentifierList of string list
-        | Containing of Value
+        | Containing of ValueType
     
-    and Value = 
-        | BitStringValue of BitStringValue
+    and ValueType = 
+        | BitStringValue of BitStringValueType
         | BooleanValue of bool
         | CharacterStringValue of string
 
-    and CharacterStringType =
+    and CharacterStringTypeType =
         | Unrestricted
         | BMPString
         | GeneralString
@@ -111,10 +120,10 @@ module Ast =
         | VideotexString
         | VisibleString
 
-    and BuiltinType =
+    and BuiltinTypeType =
         | BitStringType
         | BooleanType
-        | CharacterStringType of CharacterStringType
+        | CharacterStringType of CharacterStringTypeType
         | ChoiceType
         | DateType
         | DateTimeType
@@ -140,19 +149,44 @@ module Ast =
         | TimeType
         | TimeOfDayType
 
-    and ExceptionIdentification =
+    and ExceptionIdentificationType =
         | SignedNumber of int
-        | DefinedValue of DefinedValue
-        | TypeValue of Type * Value
+        | DefinedValue of DefinedValueType
+        | TypeValue of TypeType * ValueType
 
-open Ast
+    and QuadrupleType = {
+        group: string
+        plane: string
+        row: string
+        cell: string
+        }
+        with
+            static member make g p r c = { group = g; plane = p; row = r; cell = c }
 
+    and CharsDefnType =
+        | CString of string
+        | Quadruple of QuadrupleType
+        | Tuple of TupleType
+        | DefinedValue of DefinedValueType
+
+    and TupleType = {
+        tableColumn: string
+        tableRow: string
+        }
+        with
+            static member make c r = { tableColumn = c; tableRow = r }
+
+let (<|>) p q = attempt p <|> attempt q
 let str = pstring
 
 let betweenBraces p = between (pchar '{') (pchar '}') p
 let betweenParens p = between (pchar '(') (pchar ')') p
 let betweenDoubleQuotes p = between (pchar '"') (pchar '"') p
 let betweenQuotes p = between (pchar '\'') (pchar '\'') p
+
+let dquote = pchar '"'
+let squote = pchar '\''
+let comma = pchar ','
 
 let EXPLICIT = str "EXPLICIT"
 let IMPLICIT = str "IMPLICIT"
@@ -187,6 +221,16 @@ let threeDots = str "..."
 let CONTAINING = str "CONTAINING"
 let TRUE = str "TRUE"
 let FALSE = str "FALSE"
+
+let cstringChar = satisfy ((<>) '"') <|> (dquote .>> dquote)
+
+let cstring =
+    betweenDoubleQuotes (manyChars cstringChar)
+
+let hstring = 
+    manySatisfy (fun c -> isDigit c || isAnyOf "ABCDEF" c)
+    |> betweenQuotes
+    .>> (pchar 'H')
 
 (* Recursive rules *)
 let Type, TypeRef = createParserForwardedToRef()
@@ -231,15 +275,8 @@ let IRIValue =
 
 let DefinitiveOIDandIRI = DefinitiveOID .>>. IRIValue
 
-let DefinitiveIdentification = parse {
-    let! oid = DefinitiveOID
-    let! iri = opt IRIValue
-
-    return {
-        oid = oid
-        iri = iri
-        }
-    }
+let DefinitiveIdentification =
+    pipe2 DefinitiveOID (opt IRIValue) Ast.DefinitiveIdentifierType.make
 
 let EncodingReferenceDefault =
     encodingreference .>> str "INSTRUCTIONS" |> opt
@@ -252,17 +289,10 @@ let TagDefault =
 
 let ExtensionDefault =
     (EXTENSIBILITY >>. IMPLIED) >>% Ast.Implied
-    <|> preturn Ast.ExtensionDefault.Empty
+    <|> preturn Ast.ExtensionDefaultType.Empty
 
-let ModuleIdentifier = parse {
-    let! ref = modulereference
-    let! defId = DefinitiveIdentification
-
-    return {
-        reference = ref
-        definitive = defId
-        }
-    }
+let ModuleIdentifier = 
+    pipe2 modulereference DefinitiveIdentification Ast.ModuleIdentifierType.make
 
 let Reference =
     typereference
@@ -283,16 +313,16 @@ let SymbolList =
     sepBy Symbol (pchar ',')
 
 let Exports =
-    (EXPORTS >>. SymbolList .>> (pchar ';')) |>> Ast.Exports.Symbols
-    <|> ((EXPORTS >>. ALL .>> (pchar ';')) >>% Ast.Exports.All)
-    <|> preturn Ast.Exports.Empty
+    (EXPORTS >>. SymbolList .>> (pchar ';')) |>> Ast.ExportsType.Symbols
+    <|> ((EXPORTS >>. ALL .>> (pchar ';')) >>% Ast.ExportsType.All)
+    <|> preturn Ast.ExportsType.Empty
 
 let ExternalValueReference =
     pipe2 (modulereference .>> pchar '.') (sepBy valuereference (pchar '.'))
-        (fun m vlist -> { moduleReference = m; valueReference = vlist})
+        Ast.ExternalValueReferenceType.make
 
 let DefinedValue =
-    (ExternalValueReference |>> Ast.ExternalValueReference)
+    (ExternalValueReference |>> Ast.DefinedValueType.External)
     <|> (valuereference |>> Ast.ValueReference)
 
 let NumberForm = number
@@ -301,10 +331,10 @@ let NameAndNumberForm =
     identifier .>>. betweenParens NumberForm
 
 let ObjIdComponent =
-    (NameForm |>> Ast.ObjIdComponent.NameForm)
-    <|> (NumberForm |>> Ast.ObjIdComponent.NumberForm)
-    <|> (NameAndNumberForm |>> Ast.ObjIdComponent.NameAndNumberForm)
-    <|> (DefinedValue |>> Ast.ObjIdComponent.DefinedValue)
+    (NameForm |>> Ast.ObjIdComponentType.NameForm)
+    <|> (NumberForm |>> Ast.ObjIdComponentType.NumberForm)
+    <|> (NameAndNumberForm |>> Ast.ObjIdComponentType.NameAndNumberForm)
+    <|> (DefinedValue |>> Ast.ObjIdComponentType.DefinedValue)
 
 let ObjIdComponentsList =
     many1 ObjIdComponent
@@ -314,23 +344,23 @@ let ObjectIdentifierValue =
     |> betweenBraces 
 
 let AssignedIdentifier =
-    (ObjectIdentifierValue |>> Ast.AssignedIdentifier.ObjectIdentifierValue)
-    <|> (DefinedValue |>> Ast.AssignedIdentifier.DefinedValue)
-    <|> preturn Ast.AssignedIdentifier.Empty
+    (ObjectIdentifierValue |>> Ast.AssignedIdentifierType.ObjectIdentifierValue)
+    <|> (DefinedValue |>> Ast.AssignedIdentifierType.DefinedValue)
+    <|> preturn Ast.AssignedIdentifierType.Empty
 
 let GlobalModuleReference =
     modulereference .>>. AssignedIdentifier
 
 let SymbolsFromModule =
     pipe2 (SymbolList .>> FROM) GlobalModuleReference
-        (fun s m -> { moduleReference = m; symbols = s })
+        Ast.SymbolsFromModuleType.make
 
 let SymbolsFromModuleList =
     many SymbolsFromModule
 
 let Imports =
-    (IMPORTS >>. SymbolsFromModuleList .>> (pchar ';') |>> Ast.Imports.Symbols)
-    <|> preturn Ast.Imports.Empty
+    (IMPORTS >>. SymbolsFromModuleList .>> (pchar ';') |>> Ast.ImportsType.Symbols)
+    <|> preturn Ast.ImportsType.Empty
 
 let BitStringType =
     BIT .>> STRING >>% Ast.BitStringType
@@ -377,11 +407,6 @@ let bstring =
     |> betweenQuotes
     .>> (pchar 'B')
 
-let hstring = 
-    manySatisfy (fun c -> isDigit c || isAnyOf "ABCDEF" c)
-    |> betweenQuotes
-    .>> (pchar 'H')
-
 let IdentifierList =
     sepBy identifier (pchar ',')
 
@@ -395,13 +420,44 @@ let BooleanValue =
     TRUE >>% true
     <|> (FALSE >>% false)
 
-let cstring =
-    betweenDoubleQuotes (manyChars ((satisfy ((<>) '"')) <|> (pchar '"' .>> pchar '"')))
-    
-let foo = manyChars ((satisfy ((<>) '"')) <|> (pchar '"' .>>? pchar '"'))
-runParserOnString foo () "test" "a\"\"\"bd"
+let TableColumn = number
 
-runParserOnString cstring () "test" "\"abc\""
+let TableRow = number
+
+let Tuple = 
+    pipe2 
+        (TableColumn .>> comma) 
+        TableRow 
+        Ast.TupleType.make
+    |> betweenBraces
+
+let Cell = number
+
+let Row = number
+
+let Plane = number
+
+let Group = number
+
+let Quadruple = 
+    pipe4 
+        (Group .>> comma) 
+        (Plane .>> comma) 
+        (Row .>> comma) 
+        Cell 
+        Ast.QuadrupleType.make
+    |> betweenBraces
+
+let CharsDefn =
+    (cstring |>> Ast.CharsDefnType.CString)
+    <|> (Quadruple |>> Ast.CharsDefnType.Quadruple)
+    <|> (Tuple |>> Ast.CharsDefnType.Tuple)
+    <|> (DefinedValue |>> Ast.CharsDefnType.DefinedValue)
+
+let CharSyms =
+    sepBy1 CharsDefn comma
+
+let CharacterStringList = betweenBraces CharSyms
 
 let RestrictedCharacterStringValue =
     cstring
@@ -538,7 +594,7 @@ let AssignmentList =
 let ModuleBody =
     pipe3 Exports Imports AssignmentList (fun e i a -> { exports = e; imports = i; assignmentList = a })
 
-let ModuleDefinition = parse {
+let ModuleDefinition: Parser<Ast.ModuleDefinition, unit> = parse {
     let! id = ModuleIdentifier
     let! _ = str "DEFINITIONS"
     let! encoding = EncodingReferenceDefault
@@ -560,6 +616,7 @@ let ModuleDefinition = parse {
         }
     }
 
+(*
 SymbolsImported ::=
     SymbolsFromModuleList
     <|> empty
@@ -1088,34 +1145,6 @@ XMLCharacterStringValue ::=
     XMLRestrictedCharacterStringValue
     <|> XMLUnrestrictedCharacterStringValue
 
-CharacterStringList ::= "{" CharSyms "}"
-
-CharSyms ::=
-    CharsDefn
-    <|> CharSyms "," CharsDefn
-
-CharsDefn ::=
-    cstring
-    <|> Quadruple
-    <|> Tuple
-    <|> DefinedValue
-
-Quadruple ::= "{" Group "," Plane "," Row "," Cell "}"
-
-Group ::= number
-
-Plane ::= number
-
-Row ::= number
-
-Cell ::= number
-
-Tuple ::= "{" TableColumn "," TableRow "}"
-
-TableColumn ::= number
-
-TableRow ::= number
-
 XMLRestrictedCharacterStringValue ::= xmlcstring
 
 XMLUnrestrictedCharacterStringValue ::= XMLSequenceValue
@@ -1274,3 +1303,4 @@ DurationRange ::= ValueRange
 TimePointRange ::= ValueRange
 
 RecurrenceRange ::= ValueRange
+*)

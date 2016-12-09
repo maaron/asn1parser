@@ -1,6 +1,6 @@
 ﻿namespace asn1parser
 
-open FParsec
+open Attoparsec
 
 type Class1() = 
     member this.X = "F#"

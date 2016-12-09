@@ -211,6 +211,23 @@ let replaceDirectLeftRecursiveRule =
 
     | _ as skip -> [skip]
 
+// Returns modified and new rule separately
+let replaceDirectLeftRecursiveRule2 = 
+    discardEqualityRules >> function
+    | MatchDirectLeftRecursive (rule, recAlts, nonRecAlts) ->
+        let newRule = rule.name + "'"
+        let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
+        let newRuleAlts = 
+            (recAlts 
+                |> List.map removeFirstReference 
+                |> List.map (addReference newRule))
+             @ [Sequence [Empty]]
+
+        { name = rule.name; production = Alternate oldRuleAlts},
+        Some { name = newRule; production = Alternate newRuleAlts }
+
+    | _ as skip -> skip, None
+
 let tryFindRule name =
     List.tryPick (fun r -> 
         if r.name = name then Some r.production else None)
@@ -247,7 +264,26 @@ let removeLeftRecursion =
         |> replaceDirectLeftRecursiveRule
         |> List.append prevRules) []
 
-replaceDirectLeftRecursiveRule { name = "Expression"; production = Alternate [Sequence [Reference "Expression"; Constant "-"; Reference "Term"]; Sequence [Reference "Term"]]}
+// Returns new rules separately from the modified ones
+let removeLeftRecursionSplit =
+    ([], []) 
+
+    |> List.fold (fun (prevRules, newRules) rule -> 
+        let modRule, newRule =
+            substituteAllRules prevRules rule
+            |> replaceDirectLeftRecursiveRule2
+        (modRule :: prevRules, newRule :: newRules))
+
+    // Reverse lists so that they are in original order, since they are built up "backward" above
+    >> (fun (a, b) -> (List.rev a, List.rev b))
+
+let removeLeftRecursion2 rules =
+    removeLeftRecursionSplit rules
+    ||> List.zip
+    |> List.zip rules
+    |> List.collect (function
+        | rule, (modRule, Some newRule) -> [modRule; newRule]
+        | rule, (_, None) -> [rule])
 
 removeLeftRecursion
     ([
@@ -350,6 +386,18 @@ parseBnfFile asn1GrammarFile
 |> Option.map prettyGrammar
 |> System.Console.WriteLine
 
+parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion2
+|> Option.map prettyGrammar
+|> System.Console.WriteLine
+
+// Verify that removeLeftRecursion2 creates a grammar that removeLeftRecursion thinks is non 
+// recursive
+parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion2
+|> Option.map removeLeftRecursion
+|> Option.map List.length
+
 parseBnfString
     """
 Value ::= BitStringValue | PrefixedValue
@@ -395,3 +443,25 @@ PrefixedValue ::= Value
 // i=0: Do nothing, since Value rule is not directly recursive
 // i=1, j=0: Value rule is substituted into PrefixedValue rule to get "PrefixedValue ::= BitStringValue | PrefixedValue"
 // i=1: Remove directly recursive 2nd alternate of PrefixedValue rule to get "PrefixedValue ::= BitStringValue"
+
+// AST types to use:
+// Records - sequences with more than one non-constant element
+// Unions - rules with two or more distinct types among it's alternates
+//  - Optional: could drop empty alternates from rules and encode as an alternate or option type where ever it's used
+//  - missing rules should be assumed to have unique types?
+// NonEmptyList - has the form A ::= B C, where C matches for a list of the same type, "C ::= ... B C | empty"
+// List - has the form "A ::= ... B A | empty
+// string primitives, if specified?
+
+// Should substitutions be pulled back out after the left recursion removal???  This probably 
+// allows for some more descriptive names in many cases... but maybe it is ambiguous?
+// Or is there a way we can save the original rules and use them in cases where no 
+// recursion removal was needed?
+
+// Testing for cycles- looks like we just need to prune empty/unused afterward?
+parseBnfString """
+A ::= B x
+B ::= C x
+C ::= A x
+"""
+|> Option.map removeLeftRecursion

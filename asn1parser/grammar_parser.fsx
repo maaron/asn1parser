@@ -27,6 +27,11 @@
 //     | Sequence a (Const b) -> makeAst a
 //
 
+module Tuple =
+    let map f (a, b) = (f a, f b)
+    let mapSnd f (a, b) = (a, f b)
+    let mapFst f (a, b) = (f a, b)
+
 // AST for grammar rules:
 type AlternateExpression = Alternate of SequenceExpression list
 
@@ -121,6 +126,8 @@ let rule =
     ident .>> linearSpace .>> (pstring "::=") .>> linearSpace .>>. production .>> (opt skipNewline)
     |>> (fun (n, p) -> { name = n; production = p})
 
+let alternates (Alternate alts) = alts
+
 let grammar = spaces >>. many1 rule
 
 let parse s =
@@ -160,17 +167,21 @@ check "rule ::= sub1 | sub2" <|
                 Sequence [Reference "sub2"]]
     }]
 
-let (|MatchReference|_|) alt =
-    match alt with
-    | Alternate [Sequence [Reference r]] -> Some r
-    | _ -> None
+// Combine separate rules with equal names into a single rule with multiple alternates
+let groupAlternates =
+    List.groupBy (fun r -> r.name)
+    >> List.map (fun (n, rules) ->
+      { name = n
+        production =
+            rules
+            |> List.collect ((fun r -> r.production) >> alternates) 
+            |> Alternate
+      })
 
 let startsWithReference rule def =
     match def with
     | Sequence (Reference r :: _) when r = rule -> true
     | _ -> false
-
-let alternates (Alternate alts) = alts
 
 let (|MatchDirectLeftRecursive|_|) rule =
     let (recAlts, nonRecAlts) = alternates rule.production |> List.partition (startsWithReference rule.name)
@@ -278,6 +289,8 @@ let removeLeftRecursionSplit =
     // Reverse lists so that they are in the original order, since they are built up "backward" above
     >> (fun (a, b) -> (List.rev a, List.rev b))
 
+// Same as removeLeftRecursion, but uses original form of rules don't are found to not be 
+// recursive.
 let removeLeftRecursion2 rules =
     removeLeftRecursionSplit rules
     ||> List.zip3 rules
@@ -446,9 +459,6 @@ let ruleDependencyGraph grammar =
         |> List.choose id
         |> List.map (fun r -> (r.name, r.production)))
 
-module Tuple =
-    let map f (a, b) = (f a, f b)
-
 let declarationOrder grammar = 
     grammar 
     |> ruleDependencyGraph 
@@ -459,5 +469,71 @@ let declarationOrder grammar =
             { name = n; production = p }))
 
 parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion2
 |> Option.map declarationOrder
 |> Option.map (Tuple.map prettyGrammar)
+
+parseBnfString """
+ItemSpec ::= typereference | ItemId "." ComponentId
+ComponentId ::= identifier | number | "*"
+ItemId ::= ItemSpec
+"""
+|> Option.map removeLeftRecursion
+|> Option.map prettyGrammar
+
+parseBnfFile asn1GrammarFile
+|> Option.map prettyGrammar
+
+parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion
+|> Option.map prettyGrammar
+
+// Mapping rules to AST's.  Basic idea is to create a set of type descriptions (records, unions, 
+// etc) and a mapping that indicates what AST type each rule returns.
+//
+// Grammar -> Map<string, TypeDef>
+//
+// Or maybe start with an initial mapping?
+//
+// Map<string, TypeDef> -> Grammar -> Map<string, TypeDef>
+//
+// But, unless the algorithm assumes type names based on rule names (and doesn't need to perform 
+// lookups as it is generating type defs), it will need to handle recursively-defined rules.
+// Perhaps this is as simple as using toposort to separate the recursive ones out to special 
+// handling and process the non-recursive ones in dependency order.
+
+type TypeRef = TypeRef of string * (string option) list
+
+type Field = Field of string * TypeRef
+
+type Record = Record of string * Field list
+
+type Union = Union of string * Field list
+
+type TypeDef =
+    | TypeRef of TypeRef
+    | Record of Record
+    | Union of Union
+
+let isConst = function 
+    | Constant _ -> true
+    | _ -> false
+
+let generateRecord name sequence = 
+    let references =
+        sequence |> List.filter (function 
+            | Reference _ -> true 
+            | _ -> false)
+
+    match references with
+    | [Reference r] -> TypeRef (TypeRef (r, None))
+    | refs -> Record (name, List.map (fun r -> Field (r, TypeRef r)) refs)
+
+let generateUnion = function
+    | Alternate [alt] -> generateRecord alt
+
+let generateDirectTypes grammar =
+    grammar
+    |> List.map (fun r ->
+        match r.production with
+        | Alternate [alt] -> generateRecord alt)

@@ -174,7 +174,10 @@ let groupAlternates =
       { name = n
         production =
             rules
-            |> List.collect ((fun r -> r.production) >> alternates) 
+            |> List.collect (
+                (fun r -> r.production) 
+                >> alternates 
+                >> List.distinct) 
             |> Alternate
       })
 
@@ -421,7 +424,7 @@ module List =
     let tryAssoc item list =
         List.tryFind (fst >> (=) item) list |> Option.map snd
 
-// Put the rules in "declare before use" order, and mark those which must be recursive
+// Depth-First-Search
 let dfs graph visited start_node = 
   let rec explore path (visited, cycles) node = 
     if List.contains node path    then visited, node :: cycles else
@@ -432,8 +435,14 @@ let dfs graph visited start_node =
       node :: visited, cycles
   in explore [] visited start_node
 
+dfs [1, [2; 3]; 2, [2]; 3, []] ([], []) 2
+dfs [1, [2; 3]; 2, [1]; 3, []] ([], []) 1
+dfs [1, [2; 3]; 2, [1]; 3, [1; 2; 3]] ([], []) 1
+
 let toposort graph = 
   List.fold (fun visited (node,_) -> dfs graph visited node) ([], []) graph
+
+toposort [1, [2; 3]; 2, []; 3, []]
 
 toposort [1, [2; 3]; 2, [3; 4]; 3, [4;5]; 4, [5]; 5, []]
 toposort [1, []; 2, [1]; 3, [1;2]; 4, [2;3]; 5, [3;4]]
@@ -485,7 +494,8 @@ parseBnfFile asn1GrammarFile
 |> Option.map prettyGrammar
 
 parseBnfFile asn1GrammarFile
-|> Option.map removeLeftRecursion
+|> Option.map removeLeftRecursion2
+|> Option.map groupAlternates
 |> Option.map prettyGrammar
 
 // Mapping rules to AST's.  Basic idea is to create a set of type descriptions (records, unions, 
@@ -502,38 +512,150 @@ parseBnfFile asn1GrammarFile
 // Perhaps this is as simple as using toposort to separate the recursive ones out to special 
 // handling and process the non-recursive ones in dependency order.
 
-type TypeRef = TypeRef of string * (string option) list
+// How to handle alternates
+//  - If all the alternates are composed of constants only there is no associated AST type
+//  - If composed of only single rules with unique types, it is simply a union type
+//  - If all alternates are sequences with only one non-constant rule, it is still a union type 
+//    (constant rules don't map to any AST type)
+//  - If alternates all have a common single-rule prefix (ignoring constants), we can introduce a 
+//    new rule to factor out this prefix, and process the remainder of the sequences recursively.
+//  - For all the rules above, we have to recursively resolve rule references and use the 
+//    resulting type, not just the top-level term type.  For example, a rule that is just defined 
+//    as a constant should be treated as a constant, not a rule reference.  Perhaps when we 
+//    encounter a rule reference that is among the rules that we are trying to resolve currently 
+//    (i.e., a cycle), we just assume it to have a distinct type so that the recursion can end.
 
-type Field = Field of string * TypeRef
+let removeCycles graph =
+    let (sorted, cycles) = toposort graph
+    graph 
+    |> List.map (Tuple.mapSnd (List.except cycles))
 
-type Record = Record of string * Field list
+type Field = string * TypeDef
 
-type Union = Union of string * Field list
+and Record = Field list
 
-type TypeDef =
-    | TypeRef of TypeRef
-    | Record of Record
-    | Union of Union
+and Union = Field list
+
+and TypeDef =
+    | RecordDef of Record
+    | UnionDef of Union
+    | ExternalDef of string
+    
+type NamedType = string * TypeDef
 
 let isConst = function 
     | Constant _ -> true
     | _ -> false
 
-let generateRecord name sequence = 
-    let references =
-        sequence |> List.filter (function 
-            | Reference _ -> true 
-            | _ -> false)
+// Signature of functions that resolve rules to types
+// Map<string * AlternateExpression> -> Map<string * 'r> -> (Map<string * AlternateExpression * Map<string * 'r>)
+// This is just a State monad where the state is the pair of maps...
 
-    match references with
-    | [Reference r] -> TypeRef (TypeRef (r, None))
-    | refs -> Record (name, List.map (fun r -> Field (r, TypeRef r)) refs)
+module State =
+    let bind f m s = 
+        let (a, s') = m s
+        (f a) s'
 
-let generateUnion = function
-    | Alternate [alt] -> generateRecord alt
+    let retn a = (fun s -> (a, s))
 
-let generateDirectTypes grammar =
-    grammar
-    |> List.map (fun r ->
-        match r.production with
-        | Alternate [alt] -> generateRecord alt)
+    let map f m s = 
+        let (a, s') =  m s
+        f a, s'
+
+    let listMap f list (s: 'state) =
+        List.mapFold (fun s e -> f e s) s list
+
+    type StateBuilder() =
+        member x.Bind(m, f) = bind f m
+        member x.Return(a) = retn a
+
+let makeType name def s =
+    let (resolved, map) = s
+    def, (Map.add name def resolved, map)
+
+let resolve key f s =
+    let (visited, map) = s
+
+    match Map.tryFind key visited with
+    | Some v -> Some v, s
+    | None ->
+        match Map.tryFind key map with
+        | Some v -> 
+            match f v s with
+            | None, s' -> None, s'
+            | Some def, s' ->
+                let def, s' = makeType key def s'
+                Some def, s'
+        | None -> None, s
+
+let generateUnionFieldName (Sequence sequence) =
+    sequence
+    |> List.choose (function
+        | Reference r -> Some r
+        | _ -> None)
+    |> String.concat "And"
+
+let rec generateTermType term s =
+    match term with
+    | Reference r -> 
+        let (def, s') = resolve r generateAlternateType s
+        match def with
+        | Some d -> Some (r, d), s'
+        | None -> None, s'
+    | _ -> None, s
+
+and generateSequenceType (Sequence sequence) state =  
+    let (termTypes, s') = State.listMap generateTermType sequence state
+    let fields = termTypes |> List.choose id
+
+    match fields with
+    | [] -> None, s'
+    | [(name, t)] -> Some t, s'
+    | _ -> Some (RecordDef fields), s'
+
+and generateAlternateType (Alternate alts) state =
+    let (seqTypes, s') = State.listMap generateSequenceType alts state
+    
+    let fields = 
+        List.zip alts seqTypes
+        |> List.choose (fun (seq, def) -> 
+            match def with
+            | Some d -> Some (generateUnionFieldName seq, d)
+            | None -> None)
+
+    match fields with
+    | [] -> None, s'
+    | [(name, def)] -> Some def, s'
+    | _ -> Some (UnionDef fields), s'
+
+and generateRuleType rule s =
+    let (def, s') = generateAlternateType rule.production s
+
+    match def with
+    | Some d -> 
+        let (d, s') = makeType rule.name d s'
+        Some d, s'
+    | None -> None, s'
+
+let generateGrammarTypes predefinedTypes grammar =
+    let ruleMap = 
+        grammar 
+        |> List.map (fun r -> (r.name, r.production))
+        |> Map.ofList
+
+    let (rules, (resolved, _)) = 
+        State.listMap generateRuleType grammar (predefinedTypes, ruleMap)
+    resolved
+
+parseBnfString """
+A ::= "a constant string"
+"""
+|> Option.map (generateGrammarTypes Map.empty)
+
+parseBnfString """
+A1 ::= B C
+A2 ::= B | C
+A3 ::= B
+"""
+|> Option.map (generateGrammarTypes
+    (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))

@@ -63,12 +63,10 @@ and prettyTerm = function
     | Reference r -> r
     | Constant c -> "\"" + escapeString c + "\""
     | Empty -> "empty"
-    | Expression e -> prettyProduction e
+    | Expression e -> "(" + prettyProduction e + ")"
 
 and prettySequence (Sequence s) =
     System.String.Join(" ", s |> List.map prettyTerm)
-
-
 
 and prettyRule r =
     r.name + " ::= " + prettyProduction r.production
@@ -652,10 +650,61 @@ A ::= "a constant string"
 """
 |> Option.map (generateGrammarTypes Map.empty)
 
+// Currently, generateGrammarTypes doesn't create any type definitions if the predefineTypes 
+// argument is empty.  Should consider changing the behavior such that it treats all unresolved 
+// types as "External".  Another option is to just throw an exception.  In the end, the caller is
+// going to have to define the parsers for the undefined rules somewhere- either we make them do 
+// it up front, or give them something that won't compile until they fill in the missing pieces.
+
+// Rule A3 below generates a "local" type "BAndC", but doesn't add this to the map.  However, we 
+// also need to ensure that such types are unique (e.g., namespacing)
 parseBnfString """
 A1 ::= B C
 A2 ::= B | C
-A3 ::= B
+A3 ::= B | B C
+"""
+|> Option.map (generateGrammarTypes
+    (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))
+
+// Currently, rules such as A4 below result in "copies" of sub-rules (A3 and A2, in this case).  
+// I think we should create another "type" (this word is getting too overloaded...) that 
+// represents a "referenced" type.  It can have a reference to the actual definition, but this
+// referencing should be explicit so the caller knows whether to generate code for the type or
+// not.  However, there might be cases where we want to treat the referenced definition and the 
+// "referenced type" type as the same.  I suspect this may arise when adding some logic to use 
+// higher-level types, such as lists.  The alternative is to leave the copies as is, and 
+// instead handle type references in a post-processing step.
+parseBnfString """
+A1 ::= B C
+A2 ::= B | C
+A3 ::= B | B C
+A4 ::= A3 A2
+"""
+|> Option.map (generateGrammarTypes
+    (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))
+
+// This is a rather fundamental problem... This currently overflows the stack, as we need to mark 
+// A1 before we start trying to resolve it, as the self-referencing 2nd alternate below will 
+// continue trying to resolve A1 indefinitely.  Indirectly recursive rules will also have the same
+// problem.  Maybe this just means that we initialize rules with "External" right before we try to 
+// resolve them?  Should also consider again how dfs works as a comparison...  The process should 
+// be basically the same, although it is hard to see it in all the extra complexity.
+(*
+parseBnfString """
+A1 ::= B | A1
+"""
+|> Option.map (generateGrammarTypes
+    (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))
+*)
+
+// Sub-expressions are not currently supported (not needed for ASN.1, anyway).  The example below 
+// currently just gives the wrong result, i.e., A3 is mapped to a Record with fields B and C 
+// (whereas the "right" result is something like a record with fields B, BOrC, C, where "BOrC" is 
+// another type.
+parseBnfString """
+A1 ::= B
+A1 ::= C
+A3 ::= B (B | C) C
 """
 |> Option.map (generateGrammarTypes
     (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))

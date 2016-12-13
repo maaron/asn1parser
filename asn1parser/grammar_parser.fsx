@@ -538,7 +538,9 @@ and TypeDef =
     | RecordDef of Record
     | UnionDef of Union
     | ExternalDef of string
-    
+    | Recursive of string
+    | Empty
+
 type NamedType = string * TypeDef
 
 let isConst = function 
@@ -550,6 +552,10 @@ let isConst = function
 // This is just a State monad where the state is the pair of maps...
 
 module State =
+    let get s = s, s
+
+    let set s = (), s
+
     let bind f m s = 
         let (a, s') = m s
         (f a) s'
@@ -566,25 +572,48 @@ module State =
     type StateBuilder() =
         member x.Bind(m, f) = bind f m
         member x.Return(a) = retn a
+        member x.ReturnFrom(m) = fun s -> m s
+        member x.Zero() = ()
+
+    let state = StateBuilder()
+
+open State
+
+type GraphMapState<'a, 'b> = {
+    source: Map<string, 'a>
+    destination: Map<string, 'b>
+    visited: Set<string>
+    cycles: Map<string, 'a>
+    errors: string list
+    }
+
+type ResolveResult =
+    | Resolved of TypeDef
+    | Unresolved of string
+    | Recursive of string
 
 let makeType name def s =
-    let (resolved, map) = s
-    def, (Map.add name def resolved, map)
+    def, { s with destination = Map.add name def s.destination }
 
-let resolve key f s =
-    let (visited, map) = s
+let addError message s =
+    (), { s with errors = message :: s.errors }
 
-    match Map.tryFind key visited with
-    | Some v -> Some v, s
+let visitRule rule s = 
+    (), { s with visited = Set.add rule.name s.visited }
+
+let resolve key f = state {
+    let! s = get
+    match Map.tryFind key s.destination with
+    | Some v -> return Resolved v
     | None ->
-        match Map.tryFind key map with
+        if Set.contains key s.visited then return Recursive key else
+        match Map.tryFind key s.source with
         | Some v -> 
-            match f v s with
-            | None, s' -> None, s'
-            | Some def, s' ->
-                let def, s' = makeType key def s'
-                Some def, s'
-        | None -> None, s
+            return! f v |> State.map Resolved
+        | None -> 
+            do! addError <| sprintf "Unresolved type reference %s" key
+            return Unresolved key
+}
 
 let generateUnionFieldName (Sequence sequence) =
     sequence
@@ -598,13 +627,15 @@ let rec generateTermType term s =
     | Reference r -> 
         let (def, s') = resolve r generateAlternateType s
         match def with
-        | Some d -> Some (r, d), s'
-        | None -> None, s'
-    | _ -> None, s
+        | Resolved d -> (r, d), s'
+        | Recursive r -> (r, TypeDef.Recursive r), s'
+        | Unresolved r -> failwith <| sprintf "Unresolved type for rule %s" r
+    | Constant _ | ExpressionTerm.Empty -> ("", Empty), s
+    | Expression _ -> failwith "Sub-expressions are not supported"
 
 and generateSequenceType (Sequence sequence) state =  
     let (termTypes, s') = State.listMap generateTermType sequence state
-    let fields = termTypes |> List.choose id
+    let fields = termTypes |> List.filter (function (_, Empty) -> false | _ -> true)
 
     match fields with
     | [] -> None, s'
@@ -622,18 +653,16 @@ and generateAlternateType (Alternate alts) state =
             | None -> None)
 
     match fields with
-    | [] -> None, s'
-    | [(name, def)] -> Some def, s'
-    | _ -> Some (UnionDef fields), s'
+    | [] -> Empty, s'
+    | [(name, def)] -> def, s'
+    | _ -> UnionDef fields, s'
 
-and generateRuleType rule s =
-    let (def, s') = generateAlternateType rule.production s
-
-    match def with
-    | Some d -> 
-        let (d, s') = makeType rule.name d s'
-        Some d, s'
-    | None -> None, s'
+and generateRuleType rule = state {
+    do! visitRule rule
+    return!
+        generateAlternateType rule.production
+        |> State.bind (makeType rule.name)
+}
 
 let generateGrammarTypes predefinedTypes grammar =
     let ruleMap = 
@@ -641,20 +670,49 @@ let generateGrammarTypes predefinedTypes grammar =
         |> List.map (fun r -> (r.name, r.production))
         |> Map.ofList
 
-    let (rules, (resolved, _)) = 
-        State.listMap generateRuleType grammar (predefinedTypes, ruleMap)
-    resolved
+    let (rules, s) = 
+        State.listMap generateRuleType grammar { 
+            source = ruleMap
+            destination = predefinedTypes
+            visited = Set.empty
+            cycles = Map.empty
+            errors = []}
+    
+    s.destination
+
+parseBnfString """
+A ::= "a constant string"
+"""
+|> Option.map (fun grammar ->
+    let ruleMap = 
+        grammar 
+        |> List.map (fun r -> (r.name, r.production))
+        |> Map.ofList
+
+    generateRuleType grammar.Head { 
+        source = ruleMap
+        destination = Map.empty
+        visited = Set.empty
+        cycles = Map.empty
+        errors = []})
 
 parseBnfString """
 A ::= "a constant string"
 """
 |> Option.map (generateGrammarTypes Map.empty)
 
-// Currently, generateGrammarTypes doesn't create any type definitions if the predefineTypes 
-// argument is empty.  Should consider changing the behavior such that it treats all unresolved 
-// types as "External".  Another option is to just throw an exception.  In the end, the caller is
-// going to have to define the parsers for the undefined rules somewhere- either we make them do 
-// it up front, or give them something that won't compile until they fill in the missing pieces.
+// The types for rules which aren't defined in the grammar must be provided up front, otherwise 
+// an exception is thrown.  An alternative is to just treat them as "external", and assume they 
+// have a non-trivial type.
+try
+    parseBnfString """
+A1 ::= B C
+"""
+    |> Option.map (generateGrammarTypes Map.empty)
+with 
+    | _ as e ->
+        printf "%s\n" e.Message
+        None
 
 // Rule A3 below generates a "local" type "BAndC", but doesn't add this to the map.  However, we 
 // also need to ensure that such types are unique (e.g., namespacing)
@@ -683,28 +741,25 @@ A4 ::= A3 A2
 |> Option.map (generateGrammarTypes
     (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))
 
-// This is a rather fundamental problem... This currently overflows the stack, as we need to mark 
-// A1 before we start trying to resolve it, as the self-referencing 2nd alternate below will 
-// continue trying to resolve A1 indefinitely.  Indirectly recursive rules will also have the same
-// problem.  Maybe this just means that we initialize rules with "External" right before we try to 
-// resolve them?  Should also consider again how dfs works as a comparison...  The process should 
-// be basically the same, although it is hard to see it in all the extra complexity.
-(*
+// Recursive rules are currrently generating "Recursive" type defs, which must be further 
+// processsed.  The example below could be turned into a "B list" type.
 parseBnfString """
 A1 ::= B | A1
 """
 |> Option.map (generateGrammarTypes
     (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))
-*)
 
-// Sub-expressions are not currently supported (not needed for ASN.1, anyway).  The example below 
-// currently just gives the wrong result, i.e., A3 is mapped to a Record with fields B and C 
-// (whereas the "right" result is something like a record with fields B, BOrC, C, where "BOrC" is 
-// another type.
-parseBnfString """
+// Sub-expressions are not currently supported (not needed for ASN.1, anyway), and should throw 
+// an exception indicating such.
+try
+    parseBnfString """
 A1 ::= B
 A1 ::= C
 A3 ::= B (B | C) C
 """
-|> Option.map (generateGrammarTypes
-    (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))
+    |> Option.map (generateGrammarTypes
+        (["B", ExternalDef "BType"; "C", ExternalDef "CType"] |> Map.ofList))
+with
+    | _ as e -> 
+        printf "%s\n" e.Message
+        None

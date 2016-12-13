@@ -763,3 +763,17 @@ with
     | _ as e -> 
         printf "%s\n" e.Message
         None
+
+// Alternative method for simplifying AST types:
+// Start with a simple, "everything has a unique type" assumption, and generate a data structure 
+// that represents the parsers and their AST types.
+// Then, "fold in" all the rules by substituting sub-rules and modifying AST types as neccessary.
+// Note that this includes parser maintenance, whereas that hasn't been addressed in the prior 
+// method above.  The advantage of this method is that we don't have to explicitly deal with 
+// cycles.
+
+// Create type definitions for parsers that parallels the BNF AST types, but also includes types 
+// that represent option, list, etc., and whatever other higher-level AST types we wind up using.  
+// Also, it needs to capture the fact that parser expressions can contain terms that have unit AST 
+// types (basically, we need enough information to be able to generate the parser combinator 
+// expression and any associated AST's).

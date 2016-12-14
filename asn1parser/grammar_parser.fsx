@@ -136,6 +136,8 @@ let rule =
 
 let alternates (Alternate alts) = alts
 
+let terms (Sequence terms) = terms
+
 let grammar = spaces >>. many1 rule
 
 let parse s =
@@ -870,36 +872,7 @@ and makeNonEmptyAlternateParser alts =
     else
         parsers |> List.map fst |> String.concat " <|> ", EmptyDef
 
-let makeGrammarParser grammar = 
-    let rec makeAlternateParser2 (Alternate alts) = List.map makeSequenceParser2 alts |> AlternateParser
-
-    and makeSequenceParser2 (Sequence terms) = List.map makeTermParser2 terms |> SequenceParser
-
-    and makeTermParser2 = function
-        | Reference r -> ReferencedParser (r, EmptyDef)
-        | Constant c -> ConstantParser c
-        | Empty -> EmptyParser
-        | Expression e -> ParserExpression (makeAlternateParser2 e)
-        | OneOrMore e -> OneOrMoreParser (makeAlternateParser2 e)
-        | ZeroOrMore e -> ZeroOrMoreParser (makeAlternateParser2 e)
-        | Optional e -> OptionalParser (makeAlternateParser2 e)
-
-    List.map (Tuple.mapSnd makeAlternateParser2)
-
-parseBnfString """
-A ::= "asdf" "qwer"
-"""
-|> Option.map makeGrammarParser
-
-parseBnfString """
-A ::= B C
-B ::= "asdf"
-C ::= D "qwer"
-"""
-|> Option.map makeGrammarParser
-
 // Try starting with no AST's and substitute type definitions from the "bottom up"
-
 
 (* 
 A ::= B C ; rec B, C
@@ -929,13 +902,86 @@ which terminals have non-empty AST's.  I suppose the cycle-aware part could be i
 (actively mark non-terminals that are affected by the non-empty terminal AST) or "back" 
 (recursively lookup non-terminal emptiness by evaluating it's terms).
 *)
-type B = int
 
-type A1 = { B: B; A: A }
+let isReferenceTo name term =
+    match term with
+    | Reference r when r = name -> true
+    | _ -> false
 
-and A = 
-    | A' of A1
-    | EmptyA
+let ruleHasReferenceTo name (n, p) =
+    alternates p
+    |> List.collect terms
+    |> List.tryFind (isReferenceTo name)
+    |> Option.isSome
 
-A' { B = 123; A = EmptyA }
-A' { B = 123; A = A' { B = 234; A = EmptyA} }
+let markNonEmptyAstTypes nonEmptySet grammar =
+    let rec addType set name =
+        if Set.contains name set then set
+        else
+            let set' = Set.add name set
+            let affectedRules = 
+                grammar |> List.filter (ruleHasReferenceTo name) |> List.map fst
+            List.fold addType set' affectedRules
+    Set.fold addType Set.empty nonEmptySet
+
+parseBnfString """
+A ::= B D
+C ::= D
+E ::= A C
+"""
+|> Option.map (markNonEmptyAstTypes (["D"] |> Set.ofList))
+
+(*
+Now that we can mark all the non-empty-AST rules, we should be able to generate record and union 
+AST types by determining whether there are two or more non-empty sequences (for union) or terms 
+(for record).  However, it may be better still to generate parser and AST simultaneously, as 
+there is a strong connection between the two.
+
+Examples:
+
+A ::= B C D 
+let A = pipe3 B C D (fun b c d -> { A.B = b; A.C = c; A.D = d })
+type A = { B: B; C: C; D: D }
+
+A ::= B | C | D
+let A = (B |>> A.B) <|> (C |>> A.C) <|> (D |>> A.D)
+type A = B of B | C of C | D of D
+
+A ::= B C D ; B and D are empty
+let A = C
+type A = C
+
+A ::= B | C | D ; B and D are empty
+let A = (B |>> A.B) <|> (C |>> A.C) <|> (D |>> A.D)
+type A = B of B | C of C | D of D
+
+Interestingly, in the last two examples, only the sequence parser was affected.  But we said that 
+a grammar with no non-empty terminals should result in only empty ASTs!  This doesn't seem to 
+agree with our union experiment...  Maybe this is succintly described by saying that when a 
+sequence parser completes, it only indicates whether all terms parsed or not, whereas when an 
+alternate parser returns success, it also has information about which alternate succeeded, i.e., 
+it has more information in the success path than the sequence parser (although conversely, the 
+sequence parser has more information in the failure path!).  So maybe we need to reformulate this 
+again and say that specifying no non-empty terminals results in a bunch of union AST's.
+
+So in summary:
+Constant -> empty AST
+Reference r -> empty or reference <-- have to avoid cycles
+Expression e -> recurse e
+Optional e -> Option of recurse e
+... similar for many, many1, etc...
+Sequence terms -> empty if all terms empty, same as term if one non-empty term, record of non-empty terms, otherwise
+Alternate seqs -> same as seq if one seq, union of *all* seqs, otherwise
+
+How to decide whether a recursive (directly or indirectly) is empty?
+
+A ::= A ; empty
+A ::= B A ; empty if B is empty, otherwise (impossible) record with fields B and A
+A ::= B C A ; same as above, but depends on both B and C
+A ::= B A C ; same, just different field order
+A ::= B | A ; tempting to consider empty if B is empty, but we've already said above that all 
+              alternations are non-empty.  This one is also interesting in that it is basically
+              equivalent to A ::= B, since that is all it will match.
+A ::= B C; B ::= A C; can tell they should be empty if C is empty, but what is the algorithm to determine it?
+  It's maybe useful to realize that such a grammar is non-terminating and thus not very useful.
+*)

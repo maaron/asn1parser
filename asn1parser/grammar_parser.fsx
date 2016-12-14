@@ -48,7 +48,7 @@ and ExpressionTerm =
     | Optional of AlternateExpression
     | Empty
 
-type Rule = { name: string; production: AlternateExpression }
+type Rule = string * AlternateExpression
 
 type Grammar = Rule list
 
@@ -79,8 +79,8 @@ and prettyTerm = function
 and prettySequence (Sequence s) =
     System.String.Join(" ", s |> List.map prettyTerm)
 
-and prettyRule r =
-    r.name + " ::= " + prettyProduction r.production
+and prettyRule (name, production) =
+    name + " ::= " + prettyProduction production
 
 and prettyGrammar g =
     g
@@ -133,7 +133,6 @@ productionRef.Value <-
 
 let rule = 
     ident .>> linearSpace .>> (pstring "::=") .>> linearSpace .>>. production .>> (opt skipNewline)
-    |>> (fun (n, p) -> { name = n; production = p})
 
 let alternates (Alternate alts) = alts
 
@@ -160,59 +159,53 @@ parse "rule ::= \"tok\\\"en\""
 parse "rule ::= \"token\"\nrule2 ::= foo"
 
 // Test quoted strings
-check "rule ::= \"tok\\\"en\"" <| [{ name = "rule"; production = Alternate [Sequence [Constant "tok\"en"]]}]
-check "rule ::= \"token\"" <| [{ name = "rule"; production =Alternate [Sequence [Constant "token"]]}]
+check "rule ::= \"tok\\\"en\"" <| ["rule", Alternate [Sequence [Constant "tok\"en"]]]
+check "rule ::= \"token\"" <| ["rule", Alternate [Sequence [Constant "token"]]]
 
 check "rule ::= anotherrule" <| 
-    [{ name = "rule"; 
-       production = Alternate [Sequence [Reference "anotherrule"]]}]
+    ["rule", Alternate [Sequence [Reference "anotherrule"]]]
 
 check "rule ::= sub1 | sub2" <| 
-    [{
-        name = "rule"
-        production = 
-            Alternate [
+    ["rule", Alternate [
                 Sequence [Reference "sub1"]
                 Sequence [Reference "sub2"]]
-    }]
+    ]
 
 // Combine separate rules with equal names into a single rule with multiple alternates
 let groupAlternates =
-    List.groupBy (fun r -> r.name)
-    >> List.map (fun (n, rules) ->
-      { name = n
-        production =
+    List.groupBy fst
+    >> List.map (fun (name, rules) ->
+        let production =
             rules
             |> List.collect (
-                (fun r -> r.production) 
+                snd
                 >> alternates 
                 >> List.distinct) 
             |> Alternate
-      })
+        name, production)
 
 let startsWithReference rule def =
     match def with
     | Sequence (Reference r :: _) when r = rule -> true
     | _ -> false
 
-let (|MatchDirectLeftRecursive|_|) rule =
-    let (recAlts, nonRecAlts) = alternates rule.production |> List.partition (startsWithReference rule.name)
+let (|MatchDirectLeftRecursive|_|) (name, production) =
+    let (recAlts, nonRecAlts) = alternates production |> List.partition (startsWithReference name)
     match recAlts with
     | [] -> None
-    | _ -> Some (rule, recAlts, nonRecAlts)
+    | _ -> Some ((name, production), recAlts, nonRecAlts)
 
 let isIdentityRule name = function
     | Sequence [Reference r] when r = name -> true
     | _ -> false
 
-let discardEqualityRules rule = 
-    { rule with 
-        production = 
-            rule.production 
-            |> alternates
-            |> List.filter (isIdentityRule rule.name >> not)
-            |> Alternate
-    }
+let discardEqualityRules (name, production) = 
+    let production = 
+        production 
+        |> alternates
+        |> List.filter (isIdentityRule name >> not)
+        |> Alternate
+    name, production
 
 let addReference reference (Sequence sequence) = Sequence (sequence @ [Reference reference])
 
@@ -220,8 +213,8 @@ let removeFirstReference (Sequence s) = Sequence (List.tail s)
 
 let replaceDirectLeftRecursiveRule = 
     discardEqualityRules >> function
-    | MatchDirectLeftRecursive (rule, recAlts, nonRecAlts) ->
-        let newRule = rule.name + "'"
+    | MatchDirectLeftRecursive ((name, production), recAlts, nonRecAlts) ->
+        let newRule = name + "'"
         let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
         let newRuleAlts = 
             (recAlts 
@@ -229,16 +222,16 @@ let replaceDirectLeftRecursiveRule =
                 |> List.map (addReference newRule))
              @ [Sequence [Empty]]
 
-        [ { name = rule.name; production = Alternate oldRuleAlts}
-          { name = newRule; production = Alternate newRuleAlts } ]
+        [ name, Alternate oldRuleAlts
+          newRule, Alternate newRuleAlts ]
 
     | _ as skip -> [skip]
 
 // Returns modified and new rule separately
 let replaceDirectLeftRecursiveRule2 = 
     discardEqualityRules >> function
-    | MatchDirectLeftRecursive (rule, recAlts, nonRecAlts) ->
-        let newRule = rule.name + "'"
+    | MatchDirectLeftRecursive ((name, production), recAlts, nonRecAlts) ->
+        let newRule = name + "'"
         let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
         let newRuleAlts = 
             (recAlts 
@@ -246,14 +239,13 @@ let replaceDirectLeftRecursiveRule2 =
                 |> List.map (addReference newRule))
              @ [Sequence [Empty]]
 
-        { name = rule.name; production = Alternate oldRuleAlts},
-        Some { name = newRule; production = Alternate newRuleAlts }
+        (name, Alternate oldRuleAlts), Some (newRule, Alternate newRuleAlts)
 
     | _ as skip -> skip, None
 
 let tryFindRule name =
-    List.tryPick (fun r -> 
-        if r.name = name then Some r.production else None)
+    List.tryPick (fun (n, p) -> 
+        if name = n then Some p else None)
 
 let addTerms terms (Sequence s) = Sequence (List.append s terms)
 
@@ -265,13 +257,12 @@ let substituteSequence rules s =
         | None -> [s]
     | _ -> [s]
 
-let substituteRules rules rule =
-    { rule with 
-        production = 
-            alternates rule.production
-            |> List.collect (substituteSequence rules)
-            |> Alternate
-    }
+let substituteRules rules (name, production) =
+    let production = 
+        alternates production
+        |> List.collect (substituteSequence rules)
+        |> Alternate
+    name, production
 
 let substituteAllRules rules rule =
     rule 
@@ -322,7 +313,7 @@ let grammarRuleReferences grammar =
             | _ -> [])
 
     grammar
-    |> List.collect (fun r -> prodRefs r.production)
+    |> List.collect (snd >> prodRefs)
     |> List.distinct
 
 let unresolvedRuleReferences grammar =
@@ -352,48 +343,6 @@ parseBnfFile asn1GrammarFile
 |> Option.map removeLeftRecursion2
 |> Option.map removeLeftRecursion
 |> Option.map List.length
-
-parseBnfString
-    """
-Value ::= BitStringValue | PrefixedValue
-PrefixedValue ::= Value
-"""
-|> Option.map (List.fold (fun prevRules rule -> 
-                    substituteAllRules prevRules rule
-                    //|> replaceDirectLeftRecursiveRule
-                    |> List.singleton
-                    |> List.append prevRules) [])
-|> Option.map (List.map replaceDirectLeftRecursiveRule)
-
-{name = "PrefixedValue";
-      production =
-       Alternate
-         [Sequence [Reference "BitStringValue"];
-          Sequence [Reference "PrefixedValue"]];}
-|> replaceDirectLeftRecursiveRule
-
-{name = "PrefixedValue";
-      production =
-       Alternate
-         [Sequence [Reference "BitStringValue"];
-          Sequence [Reference "PrefixedValue"]];}
-|> (discardEqualityRules >> function
-    | MatchDirectLeftRecursive (rule, recAlts, nonRecAlts) ->
-        let newRule = rule.name + "'"
-        let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
-        let newRuleAlts = 
-            (recAlts 
-                |> List.map removeFirstReference 
-                |> List.map (addReference newRule))
-             @ [Sequence [Empty]]
-
-        [ { name = rule.name; production = Alternate oldRuleAlts}
-          { name = newRule; production = Alternate newRuleAlts } ]
-
-    | _ as skip -> [skip])
-
-{ name = "PrefixedValue"; production = Alternate [Sequence [Reference "BitStringValue"]; Sequence [Reference "PrefixedValue"]] }
-|> discardEqualityRules
 
 // i=0: Do nothing, since Value rule is not directly recursive
 // i=1, j=0: Value rule is substituted into PrefixedValue rule to get "PrefixedValue ::= BitStringValue | PrefixedValue"
@@ -467,24 +416,19 @@ let rec ruleReferences rule =
 
 let ruleDependencyGraph grammar =
     grammar
-    |> List.map (fun r -> (r.name, r.production))
     |> List.map (fun rule -> 
         let (name, prod) = rule
         rule,
         ruleReferences prod
         |> List.distinct
-        |> List.map (fun n -> List.tryFind (fun r -> r.name = n) grammar)
-        |> List.choose id
-        |> List.map (fun r -> (r.name, r.production)))
+        |> List.map (fun n -> List.tryFind (fun (n, _) -> name = n) grammar)
+        |> List.choose id)
 
 let declarationOrder grammar = 
     grammar 
     |> ruleDependencyGraph 
     |> toposort 
-    |> Tuple.map (
-        List.distinct 
-        >> List.map (fun (n, p) ->
-            { name = n; production = p }))
+    |> Tuple.map List.distinct
 
 parseBnfFile asn1GrammarFile
 |> Option.map removeLeftRecursion2
@@ -609,8 +553,8 @@ let makeType name def s =
 let addError message s =
     (), { s with errors = message :: s.errors }
 
-let visitRule rule s = 
-    (), { s with visited = Set.add rule.name s.visited }
+let visitRule (name, prod) s = 
+    (), { s with visited = Set.add name s.visited }
 
 let resolve key f = state {
     let! s = get
@@ -669,22 +613,17 @@ and generateAlternateType (Alternate alts) state =
     | [(name, def)] -> def, s'
     | _ -> UnionDef fields, s'
 
-and generateRuleType rule = state {
-    do! visitRule rule
+and generateRuleType (name, production) = state {
+    do! visitRule (name, production)
     return!
-        generateAlternateType rule.production
-        |> State.bind (makeType rule.name)
+        generateAlternateType production
+        |> State.bind (makeType name)
 }
 
 let generateGrammarTypes predefinedTypes grammar =
-    let ruleMap = 
-        grammar 
-        |> List.map (fun r -> (r.name, r.production))
-        |> Map.ofList
-
     let (rules, s) = 
         State.listMap generateRuleType grammar { 
-            source = ruleMap
+            source = grammar |> Map.ofList
             destination = predefinedTypes
             visited = Set.empty
             cycles = Map.empty
@@ -696,13 +635,8 @@ parseBnfString """
 A ::= "a constant string"
 """
 |> Option.map (fun grammar ->
-    let ruleMap = 
-        grammar 
-        |> List.map (fun r -> (r.name, r.production))
-        |> Map.ofList
-
     generateRuleType grammar.Head { 
-        source = ruleMap
+        source = grammar |> Map.ofList
         destination = Map.empty
         visited = Set.empty
         cycles = Map.empty
@@ -794,26 +728,38 @@ with
 // empty definitions (since rule references are assumed to have non-empty AST types).  This makes 
 // for a lot of redundancy if we directly generate the substituted productions.
 
+type AlternateParser = AlternateParser of SequenceParser list
+
+and SequenceParser = SequenceParser of ParserDef list
+
+and ParserDef =
+    | ReferencedParser of string * TypeDef
+    | ConstantParser of string
+    | ParserExpression of AlternateParser
+    | ZeroOrMoreParser of AlternateParser
+    | OneOrMoreParser of AlternateParser
+    | OptionalParser of AlternateParser
+    | EmptyParser
+
 let rec makeTermParser term =
     match term with
-    | Reference r -> 
-        r, ReferenceDef r
+    | ReferencedParser (r, def) -> r, def
     
-    | Constant c ->
+    | ConstantParser c ->
         sprintf "(pstring \"%s\")" (escapeString c), EmptyDef
     
-    | Empty -> 
+    | EmptyParser -> 
         "(preturn ())", EmptyDef
     
-    | ZeroOrMore e -> 
+    | ZeroOrMoreParser e -> 
         let (parser, ast) = makeAlternateParser e
         sprintf "(many %s)" parser, GenericReferenceDef ("List", [ast])
     
-    | OneOrMore e -> 
+    | OneOrMoreParser e -> 
         let (parser, ast) = makeAlternateParser e
         sprintf "(many1 %s)" parser, GenericReferenceDef ("List1", [ast])
     
-    | Optional e -> 
+    | OptionalParser e -> 
         let (parser, ast) = makeAlternateParser e
         sprintf "(opt %s)" parser, GenericReferenceDef ("Option", [ast])
     
@@ -877,13 +823,13 @@ and makeNonEmptySequenceParser terms =
     | [ast] -> String.concat " .>> " (parsers |> List.map fst), ast
     | _ -> makeRecordSequenceParser parsers
 
-and makeSequenceParser (Sequence terms) =
+and makeSequenceParser (SequenceParser terms) =
     match terms with
     | [] -> "(preturn ())", EmptyDef
     | [term] -> makeTermParser term
     | _ -> makeNonEmptySequenceParser terms
 
-and makeAlternateParser (Alternate alts) =
+and makeAlternateParser (AlternateParser alts) =
     match alts with
     | [] -> "(preturn ())", EmptyDef
     | [alt] -> makeSequenceParser alt
@@ -924,8 +870,21 @@ and makeNonEmptyAlternateParser alts =
     else
         parsers |> List.map fst |> String.concat " <|> ", EmptyDef
 
-let makeGrammarParser grammar =
-    grammar |> List.map (fun r -> makeAlternateParser r.production)
+let makeGrammarParser grammar = 
+    let rec makeAlternateParser2 (Alternate alts) = List.map makeSequenceParser2 alts |> AlternateParser
+
+    and makeSequenceParser2 (Sequence terms) = List.map makeTermParser2 terms |> SequenceParser
+
+    and makeTermParser2 = function
+        | Reference r -> ReferencedParser (r, EmptyDef)
+        | Constant c -> ConstantParser c
+        | Empty -> EmptyParser
+        | Expression e -> ParserExpression (makeAlternateParser2 e)
+        | OneOrMore e -> OneOrMoreParser (makeAlternateParser2 e)
+        | ZeroOrMore e -> ZeroOrMoreParser (makeAlternateParser2 e)
+        | Optional e -> OptionalParser (makeAlternateParser2 e)
+
+    List.map (Tuple.mapSnd makeAlternateParser2)
 
 parseBnfString """
 A ::= "asdf" "qwer"
@@ -938,3 +897,45 @@ B ::= "asdf"
 C ::= D "qwer"
 """
 |> Option.map makeGrammarParser
+
+// Try starting with no AST's and substitute type definitions from the "bottom up"
+
+
+(* 
+A ::= B C ; rec B, C
+B ::= C A ; rec C, A
+C ::= A B ; rec A, B
+
+A ::= B C   ; rec B, C
+B ::= C B C ; rec C, (rec B, C)
+C ::= (B C) B ; rec (rec B C), B
+
+A ::= B C   ; rec B, C
+B ::= C (B C) ; rec C, (rec B, C)
+C ::= ((C B C) C) (C B C) ; rec (rec (rec C B C), C), B
+
+A ::= B A | empty 
+C ::= B B
+
+To add a type definition for a rule:
+1. Add the rule to the set of non-empty-AST rules
+2. Search for all references to the rule and mark them as "referenced type"
+3. For each production that changed from empty to non-empty, recurse with changed rule
+
+Specifying a type definition for a non-terminal maybe doesn't make sense?  Otherwise, there would 
+be a conflict between the generated type and the statically specified one.  It seems that we 
+don't actually need a cycle-aware algorithm for generating type definitions, once it is known 
+which terminals have non-empty AST's.  I suppose the cycle-aware part could be in the "front" 
+(actively mark non-terminals that are affected by the non-empty terminal AST) or "back" 
+(recursively lookup non-terminal emptiness by evaluating it's terms).
+*)
+type B = int
+
+type A1 = { B: B; A: A }
+
+and A = 
+    | A' of A1
+    | EmptyA
+
+A' { B = 123; A = EmptyA }
+A' { B = 123; A = A' { B = 234; A = EmptyA} }

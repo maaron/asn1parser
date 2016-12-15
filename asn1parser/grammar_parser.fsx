@@ -125,8 +125,19 @@ let term =
     <|> (ident |>> (fun s ->  if s = "empty" then Empty else Reference s))
     <|> (quotedString |>> Constant)
 
+let postfixedTerm =
+    term .>>. many (anyOf "*+?")
+    |>> (fun (t, ops) -> 
+        ops |> List.fold (fun t op ->
+            match op with
+            | '?' -> Optional (Alternate [Sequence [t]])
+            | '*' -> ZeroOrMore (Alternate [Sequence [t]])
+            | '+' -> OneOrMore(Alternate [Sequence [t]])
+            | _ -> failwith <| sprintf "unexpected token '%A'" op)
+            t)
+
 let sequence =
-    (many1 (term .>> linearSpace) |>> Sequence)
+    (many1 (postfixedTerm .>> linearSpace) |>> Sequence)
 
 productionRef.Value <- 
     ((sepBy1 (sequence .>> linearSpace) (pchar '|' .>> linearSpace)) |>> Alternate)
@@ -159,6 +170,7 @@ parse "rule ::= anotherrule(ruleasdf|rule2)rule3"
 parse "rule ::= \"token\""
 parse "rule ::= \"tok\\\"en\""
 parse "rule ::= \"token\"\nrule2 ::= foo"
+parse "A ::= (B | C) D"
 
 // Test quoted strings
 check "rule ::= \"tok\\\"en\"" <| ["rule", Alternate [Sequence [Constant "tok\"en"]]]
@@ -480,25 +492,23 @@ parseBnfFile asn1GrammarFile
 //    encounter a rule reference that is among the rules that we are trying to resolve currently 
 //    (i.e., a cycle), we just assume it to have a distinct type so that the recursion can end.
 
-let removeCycles graph =
-    let (sorted, cycles) = toposort graph
-    graph 
-    |> List.map (Tuple.mapSnd (List.except cycles))
+type Field = string * TypeRef
 
-type Field = string * TypeDef
-
-and Record = Field list
-
-and Union = Field list
+and Composite = {
+    fields: Field list
+    }
 
 and TypeDef =
-    | RecordDef of Record
-    | UnionDef of Union
-    | ReferenceDef of string
-    | GenericReferenceDef of string * TypeDef list
+    | RecordDef of Field list
+    | UnionDef of Field list
+    | OptionalDef of TypeRef
+    | ListDef of TypeRef
+    | List1Def of TypeRef
     | EmptyDef
 
-type NamedType = string * TypeDef
+and TypeRef =
+    | TypeReference of string
+    | TypeDefinition of TypeDef
 
 let isConst = function 
     | Constant _ -> true
@@ -534,408 +544,8 @@ module State =
 
     let state = StateBuilder()
 
-open State
-
-type GraphMapState<'a, 'b> = {
-    source: Map<string, 'a>
-    destination: Map<string, 'b>
-    visited: Set<string>
-    cycles: Map<string, 'a>
-    errors: string list
-    }
-
-type ResolveResult =
-    | Resolved of TypeDef
-    | Unresolved of string
-    | Recursive of string
-
-let makeType name def s =
-    def, { s with destination = Map.add name def s.destination }
-
-let addError message s =
-    (), { s with errors = message :: s.errors }
-
-let visitRule (name, prod) s = 
-    (), { s with visited = Set.add name s.visited }
-
-let resolve key f = state {
-    let! s = get
-    match Map.tryFind key s.destination with
-    | Some v -> return Resolved v
-    | None ->
-        if Set.contains key s.visited then return Recursive key else
-        match Map.tryFind key s.source with
-        | Some v -> 
-            return! f v |> State.map Resolved
-        | None -> 
-            do! addError <| sprintf "Unresolved type reference %s" key
-            return Unresolved key
-}
-
-let generateUnionFieldName (Sequence sequence) =
-    sequence
-    |> List.choose (function
-        | Reference r -> Some r
-        | _ -> None)
-    |> String.concat "And"
-
-let rec generateTermType term s =
-    match term with
-    | Reference r -> 
-        let (def, s') = resolve r generateAlternateType s
-        match def with
-        | Resolved d -> (r, d), s'
-        | Recursive r -> (r, TypeDef.ReferenceDef r), s'
-        | Unresolved r -> failwith <| sprintf "Unresolved type for rule %s" r
-    | Constant _ | ExpressionTerm.Empty -> ("", EmptyDef), s
-    | Expression _ -> failwith "Sub-expressions are not supported"
-    | _ -> failwith "Unsupported expression type"
-
-and generateSequenceType (Sequence sequence) state =  
-    let (termTypes, s') = State.listMap generateTermType sequence state
-    let fields = termTypes |> List.filter (function (_, EmptyDef) -> false | _ -> true)
-
-    match fields with
-    | [] -> None, s'
-    | [(name, t)] -> Some t, s'
-    | _ -> Some (RecordDef fields), s'
-
-and generateAlternateType (Alternate alts) state =
-    let (seqTypes, s') = State.listMap generateSequenceType alts state
-    
-    let fields = 
-        List.zip alts seqTypes
-        |> List.choose (fun (seq, def) -> 
-            match def with
-            | Some d -> Some (generateUnionFieldName seq, d)
-            | None -> None)
-
-    match fields with
-    | [] -> EmptyDef, s'
-    | [(name, def)] -> def, s'
-    | _ -> UnionDef fields, s'
-
-and generateRuleType (name, production) = state {
-    do! visitRule (name, production)
-    return!
-        generateAlternateType production
-        |> State.bind (makeType name)
-}
-
-let generateGrammarTypes predefinedTypes grammar =
-    let (rules, s) = 
-        State.listMap generateRuleType grammar { 
-            source = grammar |> Map.ofList
-            destination = predefinedTypes
-            visited = Set.empty
-            cycles = Map.empty
-            errors = []}
-    
-    s.destination
-
-parseBnfString """
-A ::= "a constant string"
-"""
-|> Option.map (fun grammar ->
-    generateRuleType grammar.Head { 
-        source = grammar |> Map.ofList
-        destination = Map.empty
-        visited = Set.empty
-        cycles = Map.empty
-        errors = []})
-
-parseBnfString """
-A ::= "a constant string"
-"""
-|> Option.map (generateGrammarTypes Map.empty)
-
-// The types for rules which aren't defined in the grammar must be provided up front, otherwise 
-// an exception is thrown.  An alternative is to just treat them as "external", and assume they 
-// have a non-trivial type.
-try
-    parseBnfString """
-A1 ::= B C
-"""
-    |> Option.map (generateGrammarTypes Map.empty)
-with 
-    | _ as e ->
-        printf "%s\n" e.Message
-        None
-
-// Rule A3 below generates a "local" type "BAndC", but doesn't add this to the map.  However, we 
-// also need to ensure that such types are unique (e.g., namespacing)
-parseBnfString """
-A1 ::= B C
-A2 ::= B | C
-A3 ::= B | B C
-"""
-|> Option.map (generateGrammarTypes
-    (["B", ReferenceDef "BType"; "C", ReferenceDef "CType"] |> Map.ofList))
-
-// Currently, rules such as A4 below result in "copies" of sub-rules (A3 and A2, in this case).  
-// I think we should create another "type" (this word is getting too overloaded...) that 
-// represents a "referenced" type.  It can have a reference to the actual definition, but this
-// referencing should be explicit so the caller knows whether to generate code for the type or
-// not.  However, there might be cases where we want to treat the referenced definition and the 
-// "referenced type" type as the same.  I suspect this may arise when adding some logic to use 
-// higher-level types, such as lists.  The alternative is to leave the copies as is, and 
-// instead handle type references in a post-processing step.
-parseBnfString """
-A1 ::= B C
-A2 ::= B | C
-A3 ::= B | B C
-A4 ::= A3 A2
-"""
-|> Option.map (generateGrammarTypes
-    (["B", ReferenceDef "BType"; "C", ReferenceDef "CType"] |> Map.ofList))
-
-// Recursive rules are currrently generating "Recursive" type defs, which must be further 
-// processsed.  The example below could be turned into a "B list" type.
-parseBnfString """
-A1 ::= B | A1
-"""
-|> Option.map (generateGrammarTypes
-    (["B", ReferenceDef "BType"; "C", ReferenceDef "CType"] |> Map.ofList))
-
-// Sub-expressions are not currently supported (not needed for ASN.1, anyway), and should throw 
-// an exception indicating such.
-try
-    parseBnfString """
-A1 ::= B
-A1 ::= C
-A3 ::= B (B | C) C
-"""
-    |> Option.map (generateGrammarTypes
-        (["B", ReferenceDef "BType"; "C", ReferenceDef "CType"] |> Map.ofList))
-with
-    | _ as e -> 
-        printf "%s\n" e.Message
-        None
-
-// Alternative method for simplifying AST types:
-// Start with a simple, "everything has a unique type" assumption, and generate a data structure 
-// that represents the parsers and their AST types.
-// Then, "fold in" all the rules by substituting sub-rules and modifying AST types as neccessary.
-// Note that this includes parser maintenance, whereas that hasn't been addressed in the prior 
-// method above.  The advantage of this method is that we don't have to explicitly deal with 
-// cycles.
-
-// The following represents a similar approach to the one above, but involves extending the BNF 
-// AST types to encode higher-level constructs, such as lists, options, etc.  This makes the 
-// parser generate functions simpler, and hopefully transforms at the BNF level to introduce 
-// higher-level types will be simpler, too.  Also, it has the advantage that we can directly 
-// support things like kleene star, '+', or '?' right in the BNF syntax.
-
-// However, there is one drawback in that we have to perform substitutions in order to generate 
-// empty definitions (since rule references are assumed to have non-empty AST types).  This makes 
-// for a lot of redundancy if we directly generate the substituted productions.
-
-type AlternateParser = AlternateParser of SequenceParser list
-
-and SequenceParser = SequenceParser of ParserDef list
-
-and ParserDef =
-    | ReferencedParser of string * TypeDef
-    | ConstantParser of string
-    | ParserExpression of AlternateParser
-    | ZeroOrMoreParser of AlternateParser
-    | OneOrMoreParser of AlternateParser
-    | OptionalParser of AlternateParser
-    | EmptyParser
-
-let rec makeTermParser term =
-    match term with
-    | ReferencedParser (r, def) -> r, def
-    
-    | ConstantParser c ->
-        sprintf "(pstring \"%s\")" (escapeString c), EmptyDef
-    
-    | EmptyParser -> 
-        "(preturn ())", EmptyDef
-    
-    | ZeroOrMoreParser e -> 
-        let (parser, ast) = makeAlternateParser e
-        sprintf "(many %s)" parser, GenericReferenceDef ("List", [ast])
-    
-    | OneOrMoreParser e -> 
-        let (parser, ast) = makeAlternateParser e
-        sprintf "(many1 %s)" parser, GenericReferenceDef ("List1", [ast])
-    
-    | OptionalParser e -> 
-        let (parser, ast) = makeAlternateParser e
-        sprintf "(opt %s)" parser, GenericReferenceDef ("Option", [ast])
-    
-    |  _ -> failwith (sprintf "Expression term not supported: %A\n" term)
-
-and makeRecordDefFields terms =
-    terms |> List.map (fun term -> "fieldname", makeTermParser term)
-
-and generateFieldName typeDef =
-    match typeDef with
-    | ReferenceDef r -> r
-    | EmptyDef -> ""
-    | GenericReferenceDef (name, typeParams) -> failwith "Not implemented yet"
-    | RecordDef _ -> failwith "Not implemented yet"
-    | UnionDef _ -> failwith "Not implemented yet"
-
-and makeRecordSequenceParser parsers =
-    let fieldInfo =
-        parsers
-        |> List.map (fun (parser, def) ->
-            (parser, def, generateFieldName def))
-
-    let termParsers = parsers |> List.map fst |> String.concat " "
-
-    let args = 
-        [ for i = 0 to List.length fieldInfo do 
-            yield sprintf "_%d" i ]
-
-    let formalArgs = String.concat " " args
-
-    let assignments =
-        fieldInfo
-        |> List.mapi (fun i (parser, def, fieldName) -> 
-            match def with
-            | EmptyDef -> None
-            | _ -> Some <| sprintf "%s = _%d" fieldName i)
-        |> List.choose id
-        |> String.concat "; "
-        
-    let parser = 
-        sprintf "pipe%d %s (fun %s -> { %s })"
-            parsers.Length termParsers formalArgs assignments
-
-    let def = 
-        fieldInfo
-        |> List.map (fun (_, def, fieldName) -> fieldName, def)
-        |> RecordDef
-    
-    parser, def
-
-and makeNonEmptySequenceParser terms =
-    let parsers = List.map makeTermParser terms
-
-    let nonEmptyAsts = 
-        parsers 
-        |> List.map snd
-        |> List.filter (function EmptyDef -> false | _ -> true)
-
-    match nonEmptyAsts with
-    | [] -> String.concat " .>> " (parsers |> List.map fst), EmptyDef
-    | [ast] -> String.concat " .>> " (parsers |> List.map fst), ast
-    | _ -> makeRecordSequenceParser parsers
-
-and makeSequenceParser (SequenceParser terms) =
-    match terms with
-    | [] -> "(preturn ())", EmptyDef
-    | [term] -> makeTermParser term
-    | _ -> makeNonEmptySequenceParser terms
-
-and makeAlternateParser (AlternateParser alts) =
-    match alts with
-    | [] -> "(preturn ())", EmptyDef
-    | [alt] -> makeSequenceParser alt
-    | _ -> makeNonEmptyAlternateParser alts
-
-and generateUnionField typeDef =
-    CultureInfo.CurrentCulture.TextInfo.ToTitleCase (generateFieldName typeDef)
-
-and makeNonEmptyAlternateParser alts =
-    let parsers = List.map makeSequenceParser alts
-
-    // Check whether any of the child parsers contain a non-empty type def.  This determines 
-    // whether or not we generate a union AST type.
-    if parsers |> List.exists (function | (p, EmptyDef) -> false | _ -> true) then
-        let fieldInfo = 
-            parsers
-            |> List.map (fun (parser, def) ->
-                (parser, def, generateUnionField def))
-
-        let parser =
-            fieldInfo
-            |> List.map (fun (parser, def, field) ->
-                let mapper = 
-                    match def with
-                    | EmptyDef -> ">>%"
-                    | _ -> "|>>"
-
-                sprintf "(%s %s %s)" parser mapper field)
-            |> String.concat " <|> "
-
-        let def = 
-            fieldInfo 
-            |> List.map (fun (_, def, field) -> field, def)
-            |> UnionDef
-
-        parser, def
-
-    else
-        parsers |> List.map fst |> String.concat " <|> ", EmptyDef
-
-// Try starting with no AST's and substitute type definitions from the "bottom up"
-
 (* 
-A ::= B C ; rec B, C
-B ::= C A ; rec C, A
-C ::= A B ; rec A, B
-
-A ::= B C   ; rec B, C
-B ::= C B C ; rec C, (rec B, C)
-C ::= (B C) B ; rec (rec B C), B
-
-A ::= B C   ; rec B, C
-B ::= C (B C) ; rec C, (rec B, C)
-C ::= ((C B C) C) (C B C) ; rec (rec (rec C B C), C), B
-
-A ::= B A | empty 
-C ::= B B
-
-To add a type definition for a rule:
-1. Add the rule to the set of non-empty-AST rules
-2. Search for all references to the rule and mark them as "referenced type"
-3. For each production that changed from empty to non-empty, recurse with changed rule
-
-Specifying a type definition for a non-terminal maybe doesn't make sense?  Otherwise, there would 
-be a conflict between the generated type and the statically specified one.  It seems that we 
-don't actually need a cycle-aware algorithm for generating type definitions, once it is known 
-which terminals have non-empty AST's.  I suppose the cycle-aware part could be in the "front" 
-(actively mark non-terminals that are affected by the non-empty terminal AST) or "back" 
-(recursively lookup non-terminal emptiness by evaluating it's terms).
-*)
-
-let isReferenceTo name term =
-    match term with
-    | Reference r when r = name -> true
-    | _ -> false
-
-let ruleHasReferenceTo name (n, p) =
-    alternates p
-    |> List.collect terms
-    |> List.tryFind (isReferenceTo name)
-    |> Option.isSome
-
-let markNonEmptyAstTypes nonEmptySet grammar =
-    let rec addType set name =
-        if Set.contains name set then set
-        else
-            let set' = Set.add name set
-            let affectedRules = 
-                grammar |> List.filter (ruleHasReferenceTo name) |> List.map fst
-            List.fold addType set' affectedRules
-    Set.fold addType Set.empty nonEmptySet
-
-parseBnfString """
-A ::= B D
-C ::= D
-E ::= A C
-"""
-|> Option.map (markNonEmptyAstTypes (["D"] |> Set.ofList))
-
-(*
-Now that we can mark all the non-empty-AST rules, we should be able to generate record and union 
-AST types by determining whether there are two or more non-empty sequences (for union) or terms 
-(for record).  However, it may be better still to generate parser and AST simultaneously, as 
-there is a strong connection between the two.
+Pruning rules with empty AST's
 
 Examples:
 
@@ -1039,19 +649,19 @@ Term procedure
 3. If optional (or other higher-order type), return production procedure 
 
 *)
-type AstResult = Empty | NonEmpty | Cycle
+type AstResult = EmptyAst | NonEmptyAst | Cycle
 
-let isEmpty = function Empty -> true | _ -> false
+let isEmpty = function EmptyAst -> true | _ -> false
 
-let isNonEmpty = function NonEmpty -> true | _ -> false
+let isNonEmpty = function NonEmptyAst -> true | _ -> false
 
 let rec findNonEmptyTerm grammar (map, cycle) term =
     match term with
-    | Constant _ | ExpressionTerm.Empty -> Empty, (map, cycle)
+    | Constant _ | ExpressionTerm.Empty -> EmptyAst, (map, cycle)
     | Reference r ->
         match List.tryAssoc r grammar with
         | Some prod -> findNonEmptyRule grammar (map, cycle) (r, prod)
-        | None -> NonEmpty, (map, cycle)
+        | None -> NonEmptyAst, (map, cycle)
     | Expression e 
     | Optional e
     | ZeroOrMore e
@@ -1063,10 +673,10 @@ and findNonEmptyProduction grammar (map, cycle) (Alternate sequences) =
     | [Sequence terms] -> 
         let (results, (map', cycle')) = 
             List.mapFold (findNonEmptyTerm grammar) (map, cycle) terms
-        if List.exists isNonEmpty results then NonEmpty, (map', cycle')
-        else if List.forall isEmpty results then Empty, (map', cycle')
+        if List.exists isNonEmpty results then NonEmptyAst, (map', cycle')
+        else if List.forall isEmpty results then EmptyAst, (map', cycle')
         else Cycle, (map', cycle')
-    | _ -> NonEmpty, (map, cycle)
+    | _ -> NonEmptyAst, (map, cycle)
 
 and findNonEmptyRule grammar (map, cycle) (name, prod) =
     match Map.tryFind name map with
@@ -1075,8 +685,8 @@ and findNonEmptyRule grammar (map, cycle) (name, prod) =
         if Set.contains name cycle then Cycle, (map, cycle)
         else
             match findNonEmptyProduction grammar (map, Set.add name cycle) prod with
-            | Empty, (map', cycle') -> Empty, (Map.add name Empty map', cycle')
-            | NonEmpty, (map', cycle') -> NonEmpty, (Map.add name NonEmpty map', cycle')
+            | EmptyAst, (map', cycle') -> EmptyAst, (Map.add name EmptyAst map', cycle')
+            | NonEmptyAst, (map', cycle') -> NonEmptyAst, (Map.add name NonEmptyAst map', cycle')
             | _ as c -> c
 
 let findNonEmptyRules grammar =
@@ -1084,7 +694,7 @@ let findNonEmptyRules grammar =
     List.fold (fun map rule -> 
         let name = fst rule
         match findNonEmptyRule grammar (map, Set.empty) rule with
-        | Cycle, (map', _) -> Map.add name Empty map'
+        | Cycle, (map', _) -> Map.add name EmptyAst map'
         | _, (map', _) -> map')
         Map.empty
 
@@ -1099,3 +709,207 @@ A6 ::= empty
 A7 ::= A6 A2
 """
 |> Option.map findNonEmptyRules
+
+(*
+
+OK, put all this grammar reducing stuff aside, and take a simple aproach of generating an AST/parser for *every* rule
+
+Sometimes, we need to create "local" type definitions, e.g., A ::= B C | D.  In this case, A is a 
+union type with two cases.  The first case is a record type with two fields and the second is 
+just whatever type is associated with rule "D".  One way to model this effectively is to allow for
+types to carry locally-scoped types with them.
+
+Should we make a new set of types to model parser combinator expressions (including AST interactions)?
+
+A ::= B C --> let A = pipe2 B C (fun _1 _2 -> { A.B = _1; A.C = _2 })
+
+makeTypeDecl: production -> typedecl
+makeCombinator: typedecl -> bnf -> parser
+
+*)
+
+let rec makeAlternateAst (Alternate sequences) =
+    match sequences with
+    | [] -> failwith "empty alternate"
+    | [sequence] -> makeSequenceAst sequence
+    | _ -> makeUnionAst sequences
+
+and makeUnionAst sequences =
+    let fields = 
+        sequences
+        |> List.map (fun s -> 
+            let def = makeSequenceAst s
+            (generateSequenceFieldName def, def))
+    
+    TypeDefinition <| UnionDef fields
+
+and generateSequenceFieldName (typeRef: TypeRef) =
+    match typeRef with
+    | TypeReference r -> r
+    | TypeDefinition d ->
+        match d with
+        | EmptyDef -> "empty"
+        | RecordDef d -> d |> List.map fst |> String.concat "And"
+        | UnionDef d -> d |> List.map fst |> String.concat "Or"
+
+and makeSequenceAst (Sequence terms) =
+    match terms with
+    | [] -> failwith "empty sequence"
+    | [term] -> makeTermAst term
+    | _ -> makeRecordAst terms
+
+and makeRecordAst terms =
+    let fields = 
+        terms
+        |> List.map (fun t -> 
+            let def = makeTermAst t
+            (generateSequenceFieldName def, def))
+    
+    TypeDefinition <| RecordDef fields
+
+and makeTermAst term =
+    match term with
+    | Constant c -> TypeReference "string"
+    | Reference r -> TypeReference r
+    | Empty -> TypeReference "unit"
+    | Expression e -> makeAlternateAst e
+    | Optional e -> TypeDefinition (OptionalDef (makeAlternateAst e))
+    | ZeroOrMore e -> TypeDefinition (ListDef (makeAlternateAst e))
+    | OneOrMore e -> TypeDefinition (List1Def (makeAlternateAst e))
+
+let makeGrammarAst grammar =
+    List.map (Tuple.mapSnd makeAlternateAst) grammar
+
+// Here we're generating AST types for a grammar. TODO:
+//  - Should distinguish between "rule type" references, and other type references, e.g., string, 
+//    unit.  In the latter, they can become field names, which is bad.
+
+parseBnfString """
+A1 ::= B
+A2 ::= B | C
+A3 ::= B C
+A4 ::= B C | D
+A5 ::= B | A5 | empty
+"""
+|> Option.map makeGrammarAst
+
+(*
+let rec makeTermParser term =
+    match term with
+    | Reference r -> r, ReferenceDef r
+    
+    | Constant c ->
+        sprintf "(pstring \"%s\")" (escapeString c), ReferenceDef "string"
+    
+    | Empty -> 
+        "(preturn ())", EmptyDef
+    
+    | ZeroOrMore e -> 
+        let (parser, ast) = makeAlternateParser e
+        sprintf "(many %s)" parser, GenericReferenceDef ("List", [ast])
+    
+    | OneOrMore e -> 
+        let (parser, ast) = makeAlternateParser e
+        sprintf "(many1 %s)" parser, GenericReferenceDef ("List1", [ast])
+    
+    | Optional e -> 
+        let (parser, ast) = makeAlternateParser e
+        sprintf "(opt %s)" parser, GenericReferenceDef ("Option", [ast])
+    
+    |  _ -> failwith (sprintf "Expression term not supported: %A\n" term)
+
+and makeRecordDefFields terms =
+    terms |> List.map (fun term -> "fieldname", makeTermParser term)
+
+and generateFieldName typeDef =
+    match typeDef with
+    | ReferenceDef r -> r
+    | EmptyDef -> ""
+    | GenericReferenceDef (name, typeParams) -> failwith "Not implemented yet"
+    | RecordDef _ -> failwith "Not implemented yet"
+    | UnionDef _ -> failwith "Not implemented yet"
+
+and makeNonEmptySequenceParser terms =
+    let parsers = List.map makeTermParser terms
+
+    let fieldInfo =
+        parsers
+        |> List.map (fun (parser, def) ->
+            (parser, def, generateFieldName def))
+
+    let termParsers = parsers |> List.map fst |> String.concat " "
+
+    let args = 
+        [ for i = 1 to List.length fieldInfo do 
+            yield sprintf "_%d" i ]
+
+    let formalArgs = String.concat " " args
+
+    let assignments =
+        fieldInfo
+        |> List.mapi (fun i (parser, def, fieldName) -> 
+            sprintf "%s = _%d" fieldName (i+1))
+        |> String.concat "; "
+        
+    let parser = 
+        sprintf "pipe%d %s (fun %s -> { %s })"
+            parsers.Length termParsers formalArgs assignments
+
+    let def = 
+        fieldInfo
+        |> List.map (fun (_, def, fieldName) -> fieldName, def)
+        |> RecordDef
+    
+    parser, def
+
+and makeSequenceParser name (Sequence terms) =
+    match terms with
+    | [] -> "(preturn ())", EmptyDef
+    | [term] -> makeTermParser term
+    | _ -> makeNonEmptySequenceParser terms
+
+and makeAlternateParser name (Alternate alts) =
+    match alts with
+    | [] -> "(preturn ())", EmptyDef
+    | [alt] -> makeSequenceParser name alt
+    | _ -> makeNonEmptyAlternateParser name alts
+
+and generateUnionField typeDef =
+    CultureInfo.CurrentCulture.TextInfo.ToTitleCase (generateFieldName typeDef)
+
+and makeNonEmptyAlternateParser name alts =
+    let parsers = List.map makeSequenceParser alts
+
+    let fieldInfo = 
+        parsers
+        |> List.map (fun (parser, def) ->
+            (parser, def, generateUnionField def))
+
+    let parser =
+        fieldInfo
+        |> List.map (fun (parser, def, field) ->
+            let mapper = 
+                match def with
+                | EmptyDef -> ">>%"
+                | _ -> "|>>"
+
+            sprintf "(%s %s %s)" parser mapper field)
+        |> String.concat " <|> "
+
+    let def = 
+        fieldInfo 
+        |> List.map (fun (_, def, field) -> field, def)
+        |> UnionDef
+
+    parser, def
+
+let makeGrammarParser grammar =
+    List.map (fun (a, b) -> makeAlternateParser a b) grammar
+
+parseBnfString """
+A ::= B C
+A1 ::= B | C
+A2 ::= B | A2 | empty
+"""
+|> Option.map makeGrammarParser
+*)

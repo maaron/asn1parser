@@ -983,5 +983,59 @@ A ::= B | A ; tempting to consider empty if B is empty, but we've already said a
               alternations are non-empty.  This one is also interesting in that it is basically
               equivalent to A ::= B, since that is all it will match.
 A ::= B C; B ::= A C; can tell they should be empty if C is empty, but what is the algorithm to determine it?
-  It's maybe useful to realize that such a grammar is non-terminating and thus not very useful.
+  It's maybe useful to realize that such a grammar is non-terminating and thus not very useful.  
+  I think when we are trying to determine whether a sequence is empty, we defer deciding on any 
+  terminals which are found to be part of a cycle.  Then, all rules in the cycle are empty only 
+  if every element of those rules outsid the cycle are empty.  In practice, I think this can only 
+  happen with groups of cyclic sequences, since as soon as you encounter an alternate everything 
+  is non-empty.
+
+An example:
+A ::= C B
+B ::= C A
+
+Start with evaluating rule "A".  Look at C, if non-empty, then stop and consider A non-empty.  
+Otherwise, evaluate B, passing the set [A] as the "cycle check".  Evaluate B by looking at C (it 
+was found to be empty- maybe this is cached).  Then evaluate A- since it is found in the cycle, 
+return a value to indicate that "B" is part of the cycle.  The function that was evaluating A now 
+knows that the cycle is [A, B].  Since all part of A are either empty or in the cycle, A is 
+marked empty.
+
+So, in general, each sequence rule is processed by:
+1. add it to the cycle check
+2. evaluate each term as either "empty", "non=empty", or "cycle".
+3. If any are non-empty, return non-empty.  Otherwise if all are empty, return empty.  Otherwise return "cycle".
+4. (Only at the top-level) If none of the terms a non-empty (either empty or "cycle"), mark all rules in the cycle as empty.
+
+There are two levels to the algorithm above- the top-level iterates over the rules in the 
+grammar, resetting the cycle-check each time.  At each iteration, one or more rules might be 
+marked empty or non-empty.  The inner level only adds rules to the cycle check, and doesn't mark 
+any rules that are found to be in the cycle.
+
+Now, we need to extend this algorithm to handle non-sequence rules, too.  Start with an empty map 
+of "marked" rules, and iterate over the rules in the grammar:
+
+Outer rule procedure
+1. Set cycle set to just the current rule
+2. Run inner rule procedure
+3. If "cycle", mark as empty
+
+Inner rule procedure
+1. If already determined (to be empty or non-empty) return
+2. If in cycle, return "cycle"
+3. Add the rule to the cycle set
+4. Run production procedure
+5. If empty of non-empty, mark as such and return
+
+Production procedure
+1. If zero alternates, throw exception
+2. If more than 1 alternate, return non-empty
+3. If 1 alternate, call term procedure for all terms.  If any are non-empty, return non-empty.  
+   If all are empty, return empty.  Otherwise, return "cycle".
+
+Term procedure
+1. If constant or empty, return empty
+2. If rule reference and rule is defined in the grammar, return inner rule procedure.  If undefined, ???
+3. If optional (or other higher-order type), return production procedure 
+
 *)

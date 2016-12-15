@@ -1039,3 +1039,63 @@ Term procedure
 3. If optional (or other higher-order type), return production procedure 
 
 *)
+type AstResult = Empty | NonEmpty | Cycle
+
+let isEmpty = function Empty -> true | _ -> false
+
+let isNonEmpty = function NonEmpty -> true | _ -> false
+
+let rec findNonEmptyTerm grammar (map, cycle) term =
+    match term with
+    | Constant _ | ExpressionTerm.Empty -> Empty, (map, cycle)
+    | Reference r ->
+        match List.tryAssoc r grammar with
+        | Some prod -> findNonEmptyRule grammar (map, cycle) (r, prod)
+        | None -> NonEmpty, (map, cycle)
+    | Expression e 
+    | Optional e
+    | ZeroOrMore e
+    | OneOrMore e -> findNonEmptyProduction grammar (map, cycle) e
+
+and findNonEmptyProduction grammar (map, cycle) (Alternate sequences) =
+    match sequences with
+    | [] -> failwith "Unexpected empty alternate rule"
+    | [Sequence terms] -> 
+        let (results, (map', cycle')) = 
+            List.mapFold (findNonEmptyTerm grammar) (map, cycle) terms
+        if List.exists isNonEmpty results then NonEmpty, (map', cycle')
+        else if List.forall isEmpty results then Empty, (map', cycle')
+        else Cycle, (map', cycle')
+    | _ -> NonEmpty, (map, cycle)
+
+and findNonEmptyRule grammar (map, cycle) (name, prod) =
+    match Map.tryFind name map with
+    | Some r -> r, (map, cycle)
+    | None ->
+        if Set.contains name cycle then Cycle, (map, cycle)
+        else
+            match findNonEmptyProduction grammar (map, Set.add name cycle) prod with
+            | Empty, (map', cycle') -> Empty, (Map.add name Empty map', cycle')
+            | NonEmpty, (map', cycle') -> NonEmpty, (Map.add name NonEmpty map', cycle')
+            | _ as c -> c
+
+let findNonEmptyRules grammar =
+    grammar |>
+    List.fold (fun map rule -> 
+        let name = fst rule
+        match findNonEmptyRule grammar (map, Set.empty) rule with
+        | Cycle, (map', _) -> Map.add name Empty map'
+        | _, (map', _) -> map')
+        Map.empty
+
+parseBnfString """
+A ::= B C
+A1 ::= B | C
+A2 ::= "asdf" "qwer"
+A3 ::= "asdf" | A3 | empty
+A4 ::= "qwer" A4
+A5 ::= "a" | "b"
+A6 ::= empty
+A7 ::= A6 A2
+"""
+|> Option.map findNonEmptyRules

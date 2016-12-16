@@ -501,13 +501,14 @@ and Composite = {
 and TypeDef =
     | RecordDef of Field list
     | UnionDef of Field list
+
+and TypeRef =
+    | String
+    | Unit
+    | TypeReference of string
     | OptionalDef of TypeRef
     | ListDef of TypeRef
     | List1Def of TypeRef
-    | EmptyDef
-
-and TypeRef =
-    | TypeReference of string
     | TypeDefinition of TypeDef
 
 let isConst = function 
@@ -745,10 +746,14 @@ and makeUnionAst sequences =
 
 and generateSequenceFieldName (typeRef: TypeRef) =
     match typeRef with
+    | Unit -> "dummy"
+    | String -> "dummy"
     | TypeReference r -> r
+    | OptionalDef e -> "Optional" + generateSequenceFieldName e
+    | ListDef e -> generateSequenceFieldName e + "List"
+    | List1Def e -> generateSequenceFieldName e + "List1"
     | TypeDefinition d ->
         match d with
-        | EmptyDef -> "empty"
         | RecordDef d -> d |> List.map fst |> String.concat "And"
         | UnionDef d -> d |> List.map fst |> String.concat "Or"
 
@@ -769,13 +774,13 @@ and makeRecordAst terms =
 
 and makeTermAst term =
     match term with
-    | Constant c -> TypeReference "string"
+    | Constant c -> String
     | Reference r -> TypeReference r
-    | Empty -> TypeReference "unit"
+    | Empty -> Unit
     | Expression e -> makeAlternateAst e
-    | Optional e -> TypeDefinition (OptionalDef (makeAlternateAst e))
-    | ZeroOrMore e -> TypeDefinition (ListDef (makeAlternateAst e))
-    | OneOrMore e -> TypeDefinition (List1Def (makeAlternateAst e))
+    | Optional e -> OptionalDef (makeAlternateAst e)
+    | ZeroOrMore e -> ListDef (makeAlternateAst e)
+    | OneOrMore e -> List1Def (makeAlternateAst e)
 
 let makeGrammarAst grammar =
     List.map (Tuple.mapSnd makeAlternateAst) grammar
@@ -783,14 +788,21 @@ let makeGrammarAst grammar =
 // Here we're generating AST types for a grammar. TODO:
 //  - Should distinguish between "rule type" references, and other type references, e.g., string, 
 //    unit.  In the latter, they can become field names, which is bad.
+//  - Field names containing string constants are really ugly (maybe we still try for simplyfing?)
+//  - Need to identify higher-order types
 
 parseBnfString """
 A1 ::= B
 A2 ::= B | C
 A3 ::= B C
 A4 ::= B C | D
-A5 ::= B | A5 | empty
+A5 ::= B "asdf" | A5 | empty
+A6 ::= "qwer"
 """
+|> Option.map makeGrammarAst
+
+parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion2
 |> Option.map makeGrammarAst
 
 (*

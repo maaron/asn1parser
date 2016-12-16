@@ -396,6 +396,18 @@ module List =
     let tryAssoc item list =
         List.tryFind (fst >> (=) item) list |> Option.map snd
 
+    let rec tryRemovePrefix prefix list =
+        match prefix, list with
+        | [], [] -> Some []
+        | ph :: pt, lh :: lt when ph = lh -> tryRemovePrefix pt lt
+        | [], l -> Some l
+        | p, [] -> None
+        | _ -> None
+
+    let rec tryRemoveSuffix suffix list =
+        tryRemovePrefix (List.rev suffix) (List.rev list)
+        |> Option.map List.rev
+
 // Depth-First-Search
 let dfs graph visited start_node = 
   let rec explore path (visited, cycles) node = 
@@ -712,10 +724,10 @@ A7 ::= A6 A2
 |> Option.map findNonEmptyRules
 
 let rec generateFieldName (Alternate alts) =
-    alts |> List.map generateSequenceFieldName |> String.concat "And"
+    alts |> List.map generateSequenceFieldName |> String.concat "Or"
 
 and generateSequenceFieldName (Sequence terms) =
-    terms |> List.map generateTermFieldName |> String.concat "Or"
+    terms |> List.map generateTermFieldName |> String.concat "And"
 
 and generateTermFieldName term =
     match term with
@@ -863,17 +875,6 @@ A9 ::= ( ( B "asdf" "qwer" ) | B "1234" ) | B
 """
 |> Option.map makeGrammarAst
 
-parseBnfFile asn1GrammarFile
-|> Option.map removeLeftRecursion2
-|> Option.map makeGrammarAst
-
-
-let (|Last|_|) list =
-    match list with
-    | [] -> None
-    | [a] -> Some ([], a)
-    | _ -> Some (List.take ((List.length list) - 1) list, List.last list)
-
 let reduceOptionType production =
     let (nonEmpty, empty) =
         alternates production
@@ -888,18 +889,16 @@ let reduceOptionTypes grammar =
 
 let reduceListType rule =
     match Tuple.mapSnd reduceOptionType rule with
-    | name, Alternate [Sequence [Optional e]] as opt ->
-        let others, self =
-            alternates e
-            |> List.partition (function 
-                | Sequence [Reference r] when r = name -> false 
-                | _ -> true)
+    | name, Alternate [Sequence [Optional (Alternate [Sequence terms])]] as opt ->
+        let remaining = 
+            terms 
+            |> List.tryRemoveSuffix [Reference name]
 
-        match self with
-        | [] -> opt
-        | _ -> name, Alternate [Sequence [ZeroOrMore (Alternate others)]]
+        match remaining with
+        | Some terms -> name, Alternate [Sequence [ZeroOrMore (Alternate [Sequence terms])]]
+        | None -> opt
     
-    | _ -> rule
+    | _ as opt -> opt
 
 let reduceListTypes = List.map reduceListType
 
@@ -910,13 +909,111 @@ A ::= B | A | empty
 |> Option.map makeGrammarAst
 
 parseBnfString """
-A ::= B | A | empty
+A ::= B A | empty
 """
 |> Option.map reduceListTypes
 |> Option.map makeGrammarAst
 
+(*
+
+Top-down left-to-right backtracking ambiguities...  There is a problem with parsers that just 
+find the first matching alternative, as opposed to trying all of them and returning the "best" 
+match.  To make this (maybe) work out of the box, we have to convert rules of the form:
+
+A ::= B | B C
+
+To the following:
+
+A ::= B C | C
+
+But we need a more general rule than that.  I guess we define an ordering based on prefix, 
+although to be complete, we'd need to recursively examine sub-rules to find the ultimate prefix.  
+Maybe just processing one level is good enough in many cases?  Lets solve the easy problem first
+and see how far that takes us...
+
+Interestingly, the example above could also be reduced to this:
+
+A ::= B? C
+
+Also, there seems to be a connection to OneOrMore rules:
+
+A ::= C | C A  ---> C A? ---> C+
+
+This was similar to ZeroOrMore reducing:
+
+A ::= C | A | empty ---> (C A)? ---> C*
+
+More generally,
+
+ A ::= B1 B2 B3 ... BN C | B1 B2 B3 ... BN ---> B1 B2 ... BN C?
+
+*)
+
+let reducePrefixOptionType production =
+    match alternates production with
+    | [Sequence l; Sequence r] ->
+        match List.tryRemovePrefix l r with
+        | Some r' -> Alternate [Sequence (l @ [Optional (Alternate [Sequence r'])])]
+        | None ->
+            match List.tryRemovePrefix r l with
+            | Some l' -> Alternate [Sequence (r @ [Optional (Alternate [Sequence l'])])]
+            | None -> production
+    | _ -> production
+
+let reducePrefixOptionTypes grammar = grammar |> List.map (Tuple.mapSnd reducePrefixOptionType)
+
+let reduceSuffixOptionType production =
+    match alternates production with
+    | [Sequence l; Sequence r] ->
+        match List.tryRemoveSuffix l r with
+        | Some r' -> Alternate [Sequence ([Optional (Alternate [Sequence r'])] @ l)]
+        | None ->
+            match List.tryRemoveSuffix r l with
+            | Some l' -> Alternate [Sequence ([Optional (Alternate [Sequence l'])] @ r)]
+            | None -> production
+    | _ -> production
+
+let reduceSuffixOptionTypes grammar = grammar |> List.map (Tuple.mapSnd reduceSuffixOptionType)
+
+let reduceList1Type rule =
+    match Tuple.mapSnd (reducePrefixOptionType >> reduceSuffixOptionType) rule with
+    | name, Alternate [Sequence terms] as opt ->
+        let prefix = terms |> List.tryRemoveSuffix [(Optional (Alternate [Sequence [Reference name]]))]
+
+        match prefix with
+        | Some [] -> rule
+        | Some p -> name, Alternate [Sequence [OneOrMore (Alternate [Sequence p])]]
+        | _ -> rule
+    
+    | _ -> rule
+
+let reduceList1Types = List.map reduceList1Type
+
 parseBnfString """
-A ::= B | empty
+A ::= B | B C
+A1 ::= B C | B
 """
+|> Option.map reducePrefixOptionTypes
+
+parseBnfString """
+A ::= B | C B
+A1 ::= C B | B
+"""
+|> Option.map reduceSuffixOptionTypes
+
+// reduceList1Types doesn't currently handle the third and fourth rules below.  No reason it can't, but not 
+// an issue since we're planning to remove left recursion anyway
+parseBnfString """
+A1 ::= B | B A1
+A2 ::= B A2 | B
+A3 ::= A3 B | B
+A4 ::= B | A4 B
+"""
+|> Option.map reduceList1Types
+
+// Interestingly, I expected this to result in a List type, but it isn't caught either:
+parseBnfString """
+A3 ::= A3 B | B
+"""
+|> Option.map removeLeftRecursion2
 |> Option.map reduceListTypes
-|> Option.map makeGrammarAst

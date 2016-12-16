@@ -1011,9 +1011,34 @@ A4 ::= B | A4 B
 """
 |> Option.map reduceList1Types
 
-// Interestingly, I expected this to result in a List type, but it isn't caught either:
+// This could result in 4 List1 types, but the modified (left recusion removal) rules A3 and A4 
+// aren't detected as List1 because they depend on added rules A3 and A4, which are detected as 
+// List types.
 parseBnfString """
+A1 ::= B | B A1
+A2 ::= B A2 | B
 A3 ::= A3 B | B
+A4 ::= B | A4 B
+"""
+|> Option.map removeLeftRecursion
+|> Option.map reduceList1Types
+|> Option.map reduceListTypes
+
+(*
+
+TODO: There is currently a problem with removeLeftRecursion2 (removeLeftRecursion) works fine.  This grammar:
+
+A ::= B | A | empty
+
+Should result in:
+
+A ::= B | empty
+
+The difference is that the correct one removes rules of the form "A ::= A", which applies to the 
+second alternate of rule "A" in the first example.
+
+*)
+parseBnfString """
+A ::= B | A | empty
 """
 |> Option.map removeLeftRecursion2
-|> Option.map reduceListTypes

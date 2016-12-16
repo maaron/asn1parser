@@ -505,7 +505,7 @@ and TypeDef =
 and TypeRef =
     | String
     | Unit
-    | TypeReference of string
+    | RuleReference of string
     | OptionalDef of TypeRef
     | ListDef of TypeRef
     | List1Def of TypeRef
@@ -729,66 +729,143 @@ makeCombinator: typedecl -> bnf -> parser
 
 *)
 
+let rec generateFieldName (Alternate alts) =
+    alts |> List.map generateSequenceFieldName |> String.concat "And"
+
+and generateSequenceFieldName (Sequence terms) =
+    terms |> List.map generateTermFieldName |> String.concat "Or"
+
+and generateTermFieldName term =
+    match term with
+    | Constant c -> c
+    | Empty -> "empty"
+    | Reference r -> r
+    | Optional e -> "Optional" + generateFieldName e
+    | ZeroOrMore e -> generateFieldName e + "List"
+    | OneOrMore e -> generateFieldName e + "List1"
+    | Expression e -> generateFieldName e
+
 let rec makeAlternateAst (Alternate sequences) =
     match sequences with
-    | [] -> failwith "empty alternate"
+    | [] -> "(preturn ())", Unit
     | [sequence] -> makeSequenceAst sequence
     | _ -> makeUnionAst sequences
 
 and makeUnionAst sequences =
-    let fields = 
-        sequences
-        |> List.map (fun s -> 
-            let def = makeSequenceAst s
-            (generateSequenceFieldName def, def))
-    
-    TypeDefinition <| UnionDef fields
+    let fieldNames = sequences |> List.map generateSequenceFieldName
+    let parsers = sequences |> List.map makeSequenceAst
 
-and generateSequenceFieldName (typeRef: TypeRef) =
-    match typeRef with
-    | Unit -> "dummy"
-    | String -> "dummy"
-    | TypeReference r -> r
-    | OptionalDef e -> "Optional" + generateSequenceFieldName e
-    | ListDef e -> generateSequenceFieldName e + "List"
-    | List1Def e -> generateSequenceFieldName e + "List1"
-    | TypeDefinition d ->
-        match d with
-        | RecordDef d -> d |> List.map fst |> String.concat "And"
-        | UnionDef d -> d |> List.map fst |> String.concat "Or"
+    let distinctTypes =
+        parsers 
+        |> List.map snd
+        |> List.distinct
+
+    match distinctTypes with
+    | [ast] -> 
+        let alternateParser =
+            parsers
+            |> List.map fst
+            |> String.concat " <|> "
+
+        alternateParser, ast
+
+    | _ ->
+        let alternateParser =
+            List.zip fieldNames parsers
+            |> List.map (fun (fieldName, (parser, ast)) ->
+                sprintf "(%s |>> %s)" parser fieldName)
+            |> String.concat " <|> "
+
+        alternateParser, TypeDefinition <| UnionDef (List.zip fieldNames (List.map snd parsers))
 
 and makeSequenceAst (Sequence terms) =
     match terms with
-    | [] -> failwith "empty sequence"
+    | [] -> "(preturn ())", Unit
     | [term] -> makeTermAst term
     | _ -> makeRecordAst terms
 
 and makeRecordAst terms =
-    let fields = 
-        terms
-        |> List.map (fun t -> 
-            let def = makeTermAst t
-            (generateSequenceFieldName def, def))
+    let fieldNames = terms |> List.map generateTermFieldName
+    let parsers = terms |> List.map makeTermAst
+        
+    // Drop fields whose type is unit
+    let nonEmptyFields = parsers |> List.filter (function (_, Unit) -> false | _ -> true)
     
-    TypeDefinition <| RecordDef fields
+    // Replace empty records with unit
+    match nonEmptyFields with
+    | [] -> 
+        let parser = 
+            parsers 
+            |> List.map fst
+            |> String.concat " .>>. "
+
+        parser, Unit
+
+    | [name, ast] -> 
+        let parser = 
+            parsers 
+            |> List.map fst
+            |> String.concat " .>>. "
+
+        parser, ast
+
+    | _ -> 
+        let termParsers = 
+            parsers |> List.map fst
+            |> String.concat " "
+
+        let args = 
+            [ for i = 1 to List.length parsers do 
+                yield sprintf "_%d" i ]
+
+        let formalArgs = String.concat " " args
+
+        let assignments =
+            List.zip3 args fieldNames parsers
+            |> List.choose (fun (arg, fieldName, (parser, ast)) -> 
+                match ast with
+                | Unit -> None
+                | _ -> Some (sprintf "%s = %s" fieldName arg))
+            |> String.concat "; "
+        
+        let parser = 
+            sprintf "pipe%d %s (fun %s -> { %s })"
+                parsers.Length termParsers formalArgs assignments
+        
+        let fields = (List.zip fieldNames (List.map snd parsers))
+
+        parser, TypeDefinition <| RecordDef nonEmptyFields
 
 and makeTermAst term =
     match term with
-    | Constant c -> String
-    | Reference r -> TypeReference r
-    | Empty -> Unit
-    | Expression e -> makeAlternateAst e
-    | Optional e -> OptionalDef (makeAlternateAst e)
-    | ZeroOrMore e -> ListDef (makeAlternateAst e)
-    | OneOrMore e -> List1Def (makeAlternateAst e)
+    | Constant c -> 
+        sprintf "(pstring \"%s\" |> ignore)" (escapeString c)
+        , Unit
+    
+    | Reference r -> r, RuleReference r
+
+    | Empty -> "(preturn ())", Unit
+
+    | Expression e -> 
+        makeAlternateAst e
+        |> Tuple.mapFst (sprintf "(%s)")
+
+    | Optional e -> 
+        let (parser, ast) = makeAlternateAst e
+        sprintf "(opt %s)" parser, OptionalDef ast
+
+    | ZeroOrMore e -> 
+        let (parser, ast) = makeAlternateAst e
+        sprintf "(many %s)" parser, ListDef ast
+    
+    | OneOrMore e -> 
+        let (parser, ast) = makeAlternateAst e
+        sprintf "(many1 %s)" parser, List1Def ast
 
 let makeGrammarAst grammar =
     List.map (Tuple.mapSnd makeAlternateAst) grammar
 
 // Here we're generating AST types for a grammar. TODO:
-//  - Should distinguish between "rule type" references, and other type references, e.g., string, 
-//    unit.  In the latter, they can become field names, which is bad.
-//  - Field names containing string constants are really ugly (maybe we still try for simplyfing?)
 //  - Need to identify higher-order types
 
 parseBnfString """
@@ -797,131 +874,17 @@ A2 ::= B | C
 A3 ::= B C
 A4 ::= B C | D
 A5 ::= B "asdf" | A5 | empty
-A6 ::= "qwer"
+A6 ::= ( B "qwer" )*
+A7 ::= ( B "qwer" )* | B*
+A8 ::= "qwer"
+A9 ::= ( ( B "asdf" "qwer" ) | B "1234" ) | B
 """
 |> Option.map makeGrammarAst
+
+// A9 should be:
+// let A9 = ( ( B .>> "asdf" .>> "qwer" ) <|> ( B .>> "1234" ) ) <|> B
+// type A9 = B
 
 parseBnfFile asn1GrammarFile
 |> Option.map removeLeftRecursion2
 |> Option.map makeGrammarAst
-
-(*
-let rec makeTermParser term =
-    match term with
-    | Reference r -> r, ReferenceDef r
-    
-    | Constant c ->
-        sprintf "(pstring \"%s\")" (escapeString c), ReferenceDef "string"
-    
-    | Empty -> 
-        "(preturn ())", EmptyDef
-    
-    | ZeroOrMore e -> 
-        let (parser, ast) = makeAlternateParser e
-        sprintf "(many %s)" parser, GenericReferenceDef ("List", [ast])
-    
-    | OneOrMore e -> 
-        let (parser, ast) = makeAlternateParser e
-        sprintf "(many1 %s)" parser, GenericReferenceDef ("List1", [ast])
-    
-    | Optional e -> 
-        let (parser, ast) = makeAlternateParser e
-        sprintf "(opt %s)" parser, GenericReferenceDef ("Option", [ast])
-    
-    |  _ -> failwith (sprintf "Expression term not supported: %A\n" term)
-
-and makeRecordDefFields terms =
-    terms |> List.map (fun term -> "fieldname", makeTermParser term)
-
-and generateFieldName typeDef =
-    match typeDef with
-    | ReferenceDef r -> r
-    | EmptyDef -> ""
-    | GenericReferenceDef (name, typeParams) -> failwith "Not implemented yet"
-    | RecordDef _ -> failwith "Not implemented yet"
-    | UnionDef _ -> failwith "Not implemented yet"
-
-and makeNonEmptySequenceParser terms =
-    let parsers = List.map makeTermParser terms
-
-    let fieldInfo =
-        parsers
-        |> List.map (fun (parser, def) ->
-            (parser, def, generateFieldName def))
-
-    let termParsers = parsers |> List.map fst |> String.concat " "
-
-    let args = 
-        [ for i = 1 to List.length fieldInfo do 
-            yield sprintf "_%d" i ]
-
-    let formalArgs = String.concat " " args
-
-    let assignments =
-        fieldInfo
-        |> List.mapi (fun i (parser, def, fieldName) -> 
-            sprintf "%s = _%d" fieldName (i+1))
-        |> String.concat "; "
-        
-    let parser = 
-        sprintf "pipe%d %s (fun %s -> { %s })"
-            parsers.Length termParsers formalArgs assignments
-
-    let def = 
-        fieldInfo
-        |> List.map (fun (_, def, fieldName) -> fieldName, def)
-        |> RecordDef
-    
-    parser, def
-
-and makeSequenceParser name (Sequence terms) =
-    match terms with
-    | [] -> "(preturn ())", EmptyDef
-    | [term] -> makeTermParser term
-    | _ -> makeNonEmptySequenceParser terms
-
-and makeAlternateParser name (Alternate alts) =
-    match alts with
-    | [] -> "(preturn ())", EmptyDef
-    | [alt] -> makeSequenceParser name alt
-    | _ -> makeNonEmptyAlternateParser name alts
-
-and generateUnionField typeDef =
-    CultureInfo.CurrentCulture.TextInfo.ToTitleCase (generateFieldName typeDef)
-
-and makeNonEmptyAlternateParser name alts =
-    let parsers = List.map makeSequenceParser alts
-
-    let fieldInfo = 
-        parsers
-        |> List.map (fun (parser, def) ->
-            (parser, def, generateUnionField def))
-
-    let parser =
-        fieldInfo
-        |> List.map (fun (parser, def, field) ->
-            let mapper = 
-                match def with
-                | EmptyDef -> ">>%"
-                | _ -> "|>>"
-
-            sprintf "(%s %s %s)" parser mapper field)
-        |> String.concat " <|> "
-
-    let def = 
-        fieldInfo 
-        |> List.map (fun (_, def, field) -> field, def)
-        |> UnionDef
-
-    parser, def
-
-let makeGrammarParser grammar =
-    List.map (fun (a, b) -> makeAlternateParser a b) grammar
-
-parseBnfString """
-A ::= B C
-A1 ::= B | C
-A2 ::= B | A2 | empty
-"""
-|> Option.map makeGrammarParser
-*)

@@ -711,24 +711,6 @@ A7 ::= A6 A2
 """
 |> Option.map findNonEmptyRules
 
-(*
-
-OK, put all this grammar reducing stuff aside, and take a simple aproach of generating an AST/parser for *every* rule
-
-Sometimes, we need to create "local" type definitions, e.g., A ::= B C | D.  In this case, A is a 
-union type with two cases.  The first case is a record type with two fields and the second is 
-just whatever type is associated with rule "D".  One way to model this effectively is to allow for
-types to carry locally-scoped types with them.
-
-Should we make a new set of types to model parser combinator expressions (including AST interactions)?
-
-A ::= B C --> let A = pipe2 B C (fun _1 _2 -> { A.B = _1; A.C = _2 })
-
-makeTypeDecl: production -> typedecl
-makeCombinator: typedecl -> bnf -> parser
-
-*)
-
 let rec generateFieldName (Alternate alts) =
     alts |> List.map generateSequenceFieldName |> String.concat "And"
 
@@ -881,10 +863,60 @@ A9 ::= ( ( B "asdf" "qwer" ) | B "1234" ) | B
 """
 |> Option.map makeGrammarAst
 
-// A9 should be:
-// let A9 = ( ( B .>> "asdf" .>> "qwer" ) <|> ( B .>> "1234" ) ) <|> B
-// type A9 = B
-
 parseBnfFile asn1GrammarFile
 |> Option.map removeLeftRecursion2
+|> Option.map makeGrammarAst
+
+
+let (|Last|_|) list =
+    match list with
+    | [] -> None
+    | [a] -> Some ([], a)
+    | _ -> Some (List.take ((List.length list) - 1) list, List.last list)
+
+let reduceOptionType production =
+    let (nonEmpty, empty) =
+        alternates production
+        |> List.partition (function Sequence [Empty] -> false | _ -> true)
+
+    match empty with
+    | [] -> production
+    | _ -> Alternate [Sequence [Optional (Alternate nonEmpty)]]
+
+let reduceOptionTypes grammar =
+    grammar |> List.map (Tuple.mapSnd reduceOptionType)
+
+let reduceListType rule =
+    match Tuple.mapSnd reduceOptionType rule with
+    | name, Alternate [Sequence [Optional e]] as opt ->
+        let others, self =
+            alternates e
+            |> List.partition (function 
+                | Sequence [Reference r] when r = name -> false 
+                | _ -> true)
+
+        match self with
+        | [] -> opt
+        | _ -> name, Alternate [Sequence [ZeroOrMore (Alternate others)]]
+    
+    | _ -> rule
+
+let reduceListTypes = List.map reduceListType
+
+parseBnfString """
+A ::= B | A | empty
+"""
+|> Option.map reduceOptionTypes
+|> Option.map makeGrammarAst
+
+parseBnfString """
+A ::= B | A | empty
+"""
+|> Option.map reduceListTypes
+|> Option.map makeGrammarAst
+
+parseBnfString """
+A ::= B | empty
+"""
+|> Option.map reduceListTypes
 |> Option.map makeGrammarAst

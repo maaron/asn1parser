@@ -69,9 +69,9 @@ and prettyTerm = function
     | Constant c -> "\"" + escapeString c + "\""
     | Empty -> "empty"
     | Expression e -> "(" + prettyProduction e + ")"
-    | ZeroOrMore (Alternate [Sequence [term]]) -> prettyTerm term + "+"
+    | ZeroOrMore (Alternate [Sequence [term]]) -> prettyTerm term + "*"
     | ZeroOrMore e -> "(" + prettyProduction e + ")*"
-    | OneOrMore (Alternate [Sequence [term]]) -> prettyTerm term + "*"
+    | OneOrMore (Alternate [Sequence [term]]) -> prettyTerm term + "+"
     | OneOrMore e -> "(" + prettyProduction e + ")+"
     | Optional (Alternate [Sequence [term]]) -> prettyTerm term + "?"
     | Optional e -> "(" + prettyProduction e + ")?"
@@ -85,6 +85,32 @@ and prettyRule (name, production) =
 and prettyGrammar g =
     g
     |> Seq.map prettyRule 
+    |> String.concat "\n"
+
+let rec prettyProductionIndent (Alternate alts) =
+    System.String.Join ("\n    | ", alts |> List.map prettySequenceIndent)
+
+and prettyTermIndent = function
+    | Reference r -> r
+    | Constant c -> "\"" + escapeString c + "\""
+    | Empty -> "empty"
+    | Expression e -> "(" + prettyProductionIndent e + ")"
+    | ZeroOrMore (Alternate [Sequence [term]]) -> prettyTermIndent term + "*"
+    | ZeroOrMore e -> "(" + prettyProductionIndent e + ")*"
+    | OneOrMore (Alternate [Sequence [term]]) -> prettyTermIndent term + "+"
+    | OneOrMore e -> "(" + prettyProductionIndent e + ")+"
+    | Optional (Alternate [Sequence [term]]) -> prettyTermIndent term + "?"
+    | Optional e -> "(" + prettyProductionIndent e + ")?"
+
+and prettySequenceIndent (Sequence s) =
+    System.String.Join(" ", s |> List.map prettyTermIndent)
+
+and prettyRuleIndent (name, production) =
+    name + " ::= " + prettyProductionIndent production
+
+and prettyGrammarIndent g =
+    g
+    |> Seq.map prettyRuleIndent 
     |> String.concat "\n"
 
 // Bnf grammar
@@ -186,9 +212,10 @@ check "rule ::= sub1 | sub2" <|
     ]
 
 // Combine separate rules with equal names into a single rule with multiple alternates
-let groupAlternates =
-    List.groupBy fst
-    >> List.map (fun (name, rules) ->
+let groupAlternates grammar =
+    grammar
+    |> List.groupBy fst
+    |> List.map (fun (name, rules) ->
         let production =
             rules
             |> List.collect (
@@ -221,6 +248,14 @@ let discardEqualityRules (name, production) =
         |> Alternate
     name, production
 
+let discardEqualityRules2 (name, production) = 
+    let remaining, removed = 
+        production 
+        |> alternates
+        |> List.partition (isIdentityRule name >> not)
+
+    (name, Alternate remaining), removed
+
 let addReference reference (Sequence sequence) = Sequence (sequence @ [Reference reference])
 
 let removeFirstReference (Sequence s) = Sequence (List.tail s)
@@ -241,9 +276,20 @@ let replaceDirectLeftRecursiveRule =
 
     | _ as skip -> [skip]
 
-// Returns modified and new rule separately
-let replaceDirectLeftRecursiveRule2 = 
-    discardEqualityRules >> function
+//let discardEqualityRules
+
+// We need to be able to track whether a rule needs to remain modified because an equality rule 
+// was removed, or whether it can be swapped back for the original after recursion has been 
+// removed.  Therefore, this function returns three values:
+// 1. The modified rule found be substituting previous rule references
+// 2. A boolean indicating whether the rule must be kept (true = permanent)
+// 3. An optional new rule to be added to the grammar
+let replaceDirectLeftRecursiveRule2 rule = 
+    let (remaining, removed) = discardEqualityRules2 rule
+
+    let permanent = List.isEmpty removed |> not
+    
+    match remaining with
     | MatchDirectLeftRecursive ((name, production), recAlts, nonRecAlts) ->
         let newRule = name + "'"
         let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
@@ -253,15 +299,25 @@ let replaceDirectLeftRecursiveRule2 =
                 |> List.map (addReference newRule))
              @ [Sequence [Empty]]
 
-        (name, Alternate oldRuleAlts), Some (newRule, Alternate newRuleAlts)
+        (name, Alternate oldRuleAlts), true, Some (newRule, Alternate newRuleAlts)
 
-    | _ as skip -> skip, None
+    | _ -> remaining, permanent, None
 
 let tryFindRule name =
     List.tryPick (fun (n, p) -> 
         if name = n then Some p else None)
 
 let addTerms terms (Sequence s) = Sequence (List.append s terms)
+
+let substituteRule (name, production) (Alternate sequences) =
+    sequences
+    |> List.map (fun (Sequence terms) ->
+        terms
+        |> List.map (function
+            | Reference r when r = name -> Expression production
+            | _ as t -> t)
+        |> Sequence)
+    |> Alternate
 
 let substituteSequence rules s =
     match s with
@@ -293,29 +349,33 @@ let removeLeftRecursion =
         |> List.append prevRules) []
 
 // Returns new rules separately from the modified ones
-let removeLeftRecursionSplit =
-    ([], []) 
-
-    // Build a list of modified rules and a list of (possible) new rules from the original rules
-    |> List.fold (fun (prevRules, newRules) rule -> 
-        let modRule, newRule =
+let removeLeftRecursionSplit rules =
+    let folder (prevRules, permanents, newRules) rule =
+        let modRule, permanent, newRule =
             substituteAllRules prevRules rule
             |> replaceDirectLeftRecursiveRule2
-        (modRule :: prevRules, newRule :: newRules))
+        (modRule :: prevRules, permanent :: permanents, newRule :: newRules)
 
-    // Reverse lists so that they are in the original order, since they are built up "backward" above
-    >> (fun (a, b) -> (List.rev a, List.rev b))
+    List.fold folder ([],[],[]) rules
+
+    |> (fun (a, b, c) -> (List.rev a, List.rev b, List.rev c))
+    |||> List.zip3
+    |> List.map (function 
+        | modified, true, added -> Some modified, added
+        | _, false, added -> None, added)
 
 // Same as removeLeftRecursion, but uses original form of rules don't are found to not be 
 // recursive.
 let removeLeftRecursion2 rules =
     removeLeftRecursionSplit rules
-    ||> List.zip3 rules
+    |> List.zip rules
     |> List.collect (function
-        | rule, modRule, Some newRule -> [modRule; newRule]
-        | rule, _, None -> [rule])
+        | _,    (Some modified, Some added) -> [modified; added] // [modified |> Tuple.mapSnd (substituteRule added)]
+        | _,    (Some modified, None      ) -> [modified]
+        | rule, (_,             _         ) -> [rule])
 
 let asn1GrammarFile = (__SOURCE_DIRECTORY__ + "\\..\\grammar.txt")
+let asn1GrammarFile2 = (__SOURCE_DIRECTORY__ + "\\..\\grammar2.txt")
 
 let grammarRuleReferences grammar =
     let rec prodRefs prod =
@@ -340,23 +400,6 @@ let parseBnfString s =
 let parseBnfFile file =
     runParserOnFile grammar () file (System.Text.UTF8Encoding ())
     |> function Success (ast, _, _) -> Some ast | _ -> None
-
-parseBnfFile asn1GrammarFile
-|> Option.map removeLeftRecursion
-|> Option.map prettyGrammar
-|> System.Console.WriteLine
-
-parseBnfFile asn1GrammarFile
-|> Option.map removeLeftRecursion2
-|> Option.map prettyGrammar
-|> System.Console.WriteLine
-
-// Verify that removeLeftRecursion2 creates a grammar that removeLeftRecursion thinks is non 
-// recursive
-parseBnfFile asn1GrammarFile
-|> Option.map removeLeftRecursion2
-|> Option.map removeLeftRecursion
-|> Option.map List.length
 
 // i=0: Do nothing, since Value rule is not directly recursive
 // i=1, j=0: Value rule is substituted into PrefixedValue rule to get "PrefixedValue ::= BitStringValue | PrefixedValue"
@@ -456,25 +499,12 @@ let declarationOrder grammar =
     |> toposort 
     |> Tuple.map List.distinct
 
-parseBnfFile asn1GrammarFile
-|> Option.map removeLeftRecursion2
-|> Option.map declarationOrder
-|> Option.map (Tuple.map prettyGrammar)
-
 parseBnfString """
 ItemSpec ::= typereference | ItemId "." ComponentId
 ComponentId ::= identifier | number | "*"
 ItemId ::= ItemSpec
 """
 |> Option.map removeLeftRecursion
-|> Option.map prettyGrammar
-
-parseBnfFile asn1GrammarFile
-|> Option.map prettyGrammar
-
-parseBnfFile asn1GrammarFile
-|> Option.map removeLeftRecursion2
-|> Option.map groupAlternates
 |> Option.map prettyGrammar
 
 // Mapping rules to AST's.  Basic idea is to create a set of type descriptions (records, unions, 
@@ -949,6 +979,24 @@ More generally,
 
 *)
 
+let removeDuplicateAlternates grammar =
+    grammar
+    |> List.map (Tuple.mapSnd (alternates >> List.distinct >> Alternate))
+
+let discardGrammarEqualityRules grammar =
+    grammar
+    |> List.map discardEqualityRules
+
+let substituteAliases grammar =
+    let aliases, remaining =
+        grammar
+        |> List.partition (function
+            | name, Alternate [Sequence [Reference r]] -> true
+            | _ -> false)
+    
+    grammar
+    |> List.map (substituteAllRules aliases)
+
 let reducePrefixOptionType production =
     match alternates production with
     | [Sequence l; Sequence r] ->
@@ -1024,21 +1072,64 @@ A4 ::= B | A4 B
 |> Option.map reduceList1Types
 |> Option.map reduceListTypes
 
+parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion2
+|> Option.map reduceListTypes
+|> Option.map reduceList1Types
+|> Option.map removeDuplicateAlternates
+|> Option.map prettyGrammar
+|> System.Console.WriteLine
+
+parseBnfFile asn1GrammarFile2
+|> Option.map removeLeftRecursion2
+|> Option.map reduceListTypes
+|> Option.map reduceList1Types
+|> Option.map removeDuplicateAlternates
+|> Option.map prettyGrammarIndent
+|> System.Console.WriteLine
+
+parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion2
+|> Option.map reduceListTypes
+|> Option.map reduceList1Types
+|> Option.map removeDuplicateAlternates
+|> Option.map makeGrammarAst
+|> Option.bind (List.tryAssoc "XMLPrefixedValue")
+|> System.Console.WriteLine
+
+parseBnfString """
+SymbolsFromModuleList ::= SymbolsFromModule SymbolsFromModuleList1
+SymbolsFromModuleList1 ::= SymbolsFromModule SymbolsFromModuleList1 | empty
+"""
+|> Option.map reduceListTypes
+
+parseBnfString """
+A ::= B | B | C | C
+"""
+|> Option.map removeDuplicateAlternates
+
+parseBnfFile asn1GrammarFile2
+|> Option.map discardGrammarEqualityRules
+|> Option.map substituteAliases
+|> Option.map removeLeftRecursion2
+|> Option.map prettyGrammarIndent
+
 (*
 
-TODO: There is currently a problem with removeLeftRecursion2 (removeLeftRecursion) works fine.  This grammar:
+One of the big problems with left recursion removal in the ASN.1 grammar is rules of the form:
 
-A ::= B | A | empty
+A ::= B | A ... B
 
-Should result in:
+Many of these sort of rules are used to describe delimited lists, e.g.:
 
-A ::= B | empty
+ValueList ::= Value | ValueList "," Value
 
-The difference is that the correct one removes rules of the form "A ::= A", which applies to the 
-second alternate of rule "A" in the first example.
+In these cases, if we make this simple transformation:
+
+ValueList ::= Value | Value "," ValueList
+
+We can avoid *huge* amounts of grammar mangling induced by Paull's method.  Or, more generally:
+
+A ::= B | B ... A
 
 *)
-parseBnfString """
-A ::= B | A | empty
-"""
-|> Option.map removeLeftRecursion2

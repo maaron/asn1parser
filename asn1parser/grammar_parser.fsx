@@ -34,6 +34,33 @@ module Tuple =
     let mapSnd f (a, b) = (a, f b)
     let mapFst f (a, b) = (f a, b)
 
+module List =
+    let assoc item list =
+        List.find (fst >> (=) item) list |> snd
+
+    let tryAssoc item list =
+        List.tryFind (fst >> (=) item) list |> Option.map snd
+
+    let rec tryRemovePrefix prefix list =
+        match prefix, list with
+        | [], [] -> Some []
+        | ph :: pt, lh :: lt when ph = lh -> tryRemovePrefix pt lt
+        | [], l -> Some l
+        | p, [] -> None
+        | _ -> None
+
+    let rec tryRemoveSuffix suffix list =
+        tryRemovePrefix (List.rev suffix) (List.rev list)
+        |> Option.map List.rev
+
+    let partition2 f list =
+        let folder (ll, rl) e =
+            match f e with
+            | Choice1Of2 l -> l :: ll, rl
+            | Choice2Of2 r -> ll, r :: rl
+        let (ll, rl) = List.fold folder ([],[]) list
+        (List.rev ll, List.rev rl)
+
 // AST for grammar rules:
 type AlternateExpression = Alternate of SequenceExpression list
 
@@ -231,10 +258,15 @@ let startsWithReference rule def =
     | _ -> false
 
 let (|MatchDirectLeftRecursive|_|) (name, production) =
-    let (recAlts, nonRecAlts) = alternates production |> List.partition (startsWithReference name)
-    match recAlts with
+    let alphas, betas = 
+        alternates production
+        |> List.partition2 (function
+            | Sequence (Reference r :: t) when r = name -> Choice1Of2 (Sequence t)
+            | Sequence beta -> Choice2Of2 (Sequence beta))
+    
+    match alphas with
     | [] -> None
-    | _ -> Some ((name, production), recAlts, nonRecAlts)
+    | _ -> Some ((name, production), alphas, betas)
 
 let isIdentityRule name = function
     | Sequence [Reference r] when r = name -> true
@@ -262,14 +294,15 @@ let removeFirstReference (Sequence s) = Sequence (List.tail s)
 
 let replaceDirectLeftRecursiveRule = 
     discardEqualityRules >> function
-    | MatchDirectLeftRecursive ((name, production), recAlts, nonRecAlts) ->
+    | MatchDirectLeftRecursive ((name, production), alphas, betas) ->
         let newRule = name + "'"
-        let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
+        let oldRuleAlts = 
+            betas |> List.map (addReference newRule)
+        
         let newRuleAlts = 
-            (recAlts 
-                |> List.map removeFirstReference 
-                |> List.map (addReference newRule))
-             @ [Sequence [Empty]]
+            alphas 
+            |> List.map (addReference newRule)
+            |> List.append [Sequence [Empty]]
 
         [ name, Alternate oldRuleAlts
           newRule, Alternate newRuleAlts ]
@@ -290,16 +323,26 @@ let replaceDirectLeftRecursiveRule2 rule =
     let permanent = List.isEmpty removed |> not
     
     match remaining with
-    | MatchDirectLeftRecursive ((name, production), recAlts, nonRecAlts) ->
-        let newRule = name + "'"
-        let oldRuleAlts = nonRecAlts |> List.map (addReference newRule)
-        let newRuleAlts = 
-            (recAlts 
-                |> List.map removeFirstReference 
-                |> List.map (addReference newRule))
-             @ [Sequence [Empty]]
+    | MatchDirectLeftRecursive ((name, production), alphas, betas) ->
+        if alphas = betas then
+            let alts = 
+                alphas
+                |> List.map (addReference name)
+                |> List.append betas
 
-        (name, Alternate oldRuleAlts), true, Some (newRule, Alternate newRuleAlts)
+            (name, Alternate alts), true, None
+        
+        else
+            let newRule = name + "'"
+            let oldRuleAlts = 
+                betas |> List.map (addReference newRule)
+        
+            let newRuleAlts = 
+                alphas 
+                |> List.map (addReference newRule)
+                |> List.append [Sequence [Empty]]
+
+            (name, Alternate oldRuleAlts), true, Some (newRule, Alternate newRuleAlts)
 
     | _ -> remaining, permanent, None
 
@@ -432,25 +475,6 @@ C ::= A x
 """
 |> Option.map removeLeftRecursion
 
-module List =
-    let assoc item list =
-        List.find (fst >> (=) item) list |> snd
-
-    let tryAssoc item list =
-        List.tryFind (fst >> (=) item) list |> Option.map snd
-
-    let rec tryRemovePrefix prefix list =
-        match prefix, list with
-        | [], [] -> Some []
-        | ph :: pt, lh :: lt when ph = lh -> tryRemovePrefix pt lt
-        | [], l -> Some l
-        | p, [] -> None
-        | _ -> None
-
-    let rec tryRemoveSuffix suffix list =
-        tryRemovePrefix (List.rev suffix) (List.rev list)
-        |> Option.map List.rev
-
 // Depth-First-Search
 let dfs graph visited start_node = 
   let rec explore path (visited, cycles) node = 
@@ -469,11 +493,57 @@ dfs [1, [2; 3]; 2, [1]; 3, [1; 2; 3]] ([], []) 1
 let toposort graph = 
   List.fold (fun visited (node,_) -> dfs graph visited node) ([], []) graph
 
-toposort [1, [2; 3]; 2, []; 3, []]
+let inneighbors node graph =
+    List.choose (fun (k, v) -> if List.contains node v then Some k else None) graph
 
-toposort [1, [2; 3]; 2, [3; 4]; 3, [4;5]; 4, [5]; 5, []]
-toposort [1, []; 2, [1]; 3, [1;2]; 4, [2;3]; 5, [3;4]]
-toposort [1, [2; 3]; 2, [3; 4]; 3, [4;5]; 4, [5]; 5, [2; 3]]
+let scc graph =
+    let rec visit (list, visited) node =
+        if Set.contains node visited then (list, visited) else
+        let neighbors = 
+            match List.tryAssoc node graph with
+            | None -> []
+            | Some n -> n
+        let (list', visited') = List.fold visit (list, Set.add node visited) neighbors
+        (node :: list', visited')
+    let (l, visited) = 
+        graph
+        |> List.map fst
+        |> List.fold visit ([], Set.empty)
+
+    let rec assign (cycle, assigned) node =
+        if Set.contains node assigned then cycle, assigned else
+        let ineighbors = inneighbors node graph
+        List.fold assign (node :: cycle, Set.add node assigned) ineighbors
+    
+    List.mapFold (fun assigned node -> assign ([], assigned) node)
+        Set.empty l
+    |> fst
+    |> List.filter (List.isEmpty >> not)
+
+let cycles graph =
+    scc graph
+    |> List.filter (function 
+        | [node] -> 
+            match List.tryAssoc node graph with
+            | None -> false
+            | Some nodes -> List.contains node nodes
+        | _ -> true)
+
+scc    [1, []; 2, []; 3, []]
+cycles [1, []; 2, []; 3, []]
+
+cycles [1, [2]; 2, [1]; 3, [3]]
+cycles [1, [2]; 2, [1]; 3, []]
+
+cycles [1, [1;2;3]; 2, [1;2;3]; 3, [1;2;3]]
+
+cycles [1, [2]; 2, [1; 3]; 3, []]
+
+cycles [1, [2]; 2, [1]; 3, [4]; 4, [3]]
+
+cycles [1, [2;3]; 2, [1]; 3, [4]; 4, [3]]
+
+dfs [1, [2]; 2, [1]; 3, [3]] ([],[]) 1
 
 let rec ruleReferences rule =
     alternates rule
@@ -498,6 +568,25 @@ let declarationOrder grammar =
     |> ruleDependencyGraph 
     |> toposort 
     |> Tuple.map List.distinct
+
+let ruleDeps grammar =
+    grammar
+    |> List.map (Tuple.mapSnd ruleReferences)
+
+let refersTo name production =
+    ruleReferences production
+    |> List.contains name
+
+parseBnfFile asn1GrammarFile
+|> Option.map ruleDeps
+|> Option.map cycles
+
+parseBnfString """
+A ::= A B C
+"""
+|> Option.map ruleDeps
+|> Option.map cycles
+|> Option.map (List.iter (String.concat "," >> System.Console.WriteLine))
 
 parseBnfString """
 ItemSpec ::= typereference | ItemId "." ComponentId
@@ -1133,3 +1222,65 @@ We can avoid *huge* amounts of grammar mangling induced by Paull's method.  Or, 
 A ::= B | B ... A
 
 *)
+
+let reduceListLikeLeftRecursion rule =
+    match rule with
+    | name, Alternate [Sequence lterms; Sequence rterms] ->
+        let remaining =
+            rterms 
+            |> List.tryRemovePrefix [Reference name] 
+            |> Option.bind (List.tryRemoveSuffix lterms)
+
+        match remaining with
+        | None -> rule
+        | Some terms -> name, Alternate [Sequence lterms; Sequence (lterms @ terms @ [Reference name])]
+
+    | _ -> rule
+
+let reduceListLikeLeftRecursions grammar =
+    grammar |> List.map reduceListLikeLeftRecursion
+
+parseBnfString """
+A ::= B | A C D E B
+"""
+|> Option.map reduceListLikeLeftRecursions
+
+parseBnfString """
+C ::= H | I H
+B ::= B D | B E | B F | C G
+A ::= B | C | A D
+"""
+|> Option.map removeLeftRecursion2
+
+parseBnfString """
+A ::= B | A B
+"""
+// A  ::= B A'
+// A' ::= B A' | empty
+|> Option.map (List.map replaceDirectLeftRecursiveRule2)
+
+parseBnfString """
+A ::= B | C | A B | A C
+"""
+// A  ::= B A' | C A'
+// A' ::= B A' | C A' | empty
+// A  ::= B | C | B A | C A
+|> Option.map removeLeftRecursion2
+
+parseBnfFile asn1GrammarFile
+|> Option.map removeLeftRecursion2
+|> Option.map prettyGrammarIndent
+
+parseBnfFile asn1GrammarFile2
+//|> Option.map reduceListLikeLeftRecursions
+|> Option.map removeLeftRecursion2
+|> Option.map prettyGrammarIndent
+
+parseBnfFile asn1GrammarFile
+|> Option.map reduceListLikeLeftRecursions
+|> Option.map discardGrammarEqualityRules
+//|> Option.map substituteAliases
+|> Option.map removeLeftRecursion2
+|> Option.map (List.assoc "PrefixedValue")
+
+// The simplification is possible when the set of "alpha" terms is the same as the set of "beta" terms

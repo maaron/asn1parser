@@ -65,6 +65,7 @@
     <None Include="farser_nobacktrack_nocps.fsx" />
     <None Include="grammar_parser.fsx" />
     <None Include="farser_simple.fsx" />
+    <None Include="scanrat.fsx" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="FParsec">
@@ -81,6 +82,10 @@
     </Reference>
     <Reference Include="mscorlib" />
     <Reference Include="FSharp.Core, Version=$(TargetFSharpCoreVersion), Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="ScanRat">
+      <HintPath>..\packages\ScanRat.0.5.0.0\lib\portable-net45+win+wpa81+wp80+MonoAndroid10+xamarinios10+MonoTouch10\ScanRat.dll</HintPath>
       <Private>True</Private>
     </Reference>
     <Reference Include="System" />
